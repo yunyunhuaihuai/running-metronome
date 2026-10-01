@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">节拍器</string>
+    <string name="bpm_unit">BPM（0 = 停止）</string>
+    <string name="start">启动节拍器</string>
+    <string name="stop">停止</string>
+    <string name="sound">声音</string>
+    <string name="vibrate">振动</string>
+    <string name="vib_strength">强度</string>
+    <string name="vib_strength_fmt">%d%%</string>
+    <string name="vib_strength_max">100%（最强）</string>
+    <string name="timbre_title">音色</string>
+    <string name="custom_audio">自定义音频</string>
+    <string name="pick_audio">选择音频文件…</string>
+    <string name="status_idle">未运行</string>
+    <string name="status_running">运行中</string>
+    <string name="status_paused">已暂停（BPM=0）</string>
+    <string name="beats_fmt">已打 %d 拍</string>
+    <string name="beats_zero">已打 0 拍</string>
+    <string name="notif_channel">节拍器后台服务</string>
+    <string name="stop_action">停止</string>
+</resources>
