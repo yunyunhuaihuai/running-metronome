@@ -281,7 +281,13 @@ class MainActivity : AppCompatActivity() {
                 }
                 launch {
                     StepTracker.currentCadence.collect { spm ->
-                        cadenceText.text = if (spm == 0) "实时步频: 0 SPM" else "实时步频: $spm SPM"
+                        val warming =
+                            StepTracker.trackerState.value == CadenceStateMachine.State.WARMING_UP
+                        cadenceText.text = when {
+                            warming -> "实时步频: --"
+                            spm == 0 -> "实时步频: 0 SPM"
+                            else -> "实时步频: $spm SPM"
+                        }
                     }
                 }
                 launch {
@@ -289,6 +295,12 @@ class MainActivity : AppCompatActivity() {
                 }
                 launch {
                     StepTracker.alarmProgressSec.collect { updateAlarmStatus() }
+                }
+                launch {
+                    StepTracker.trackerState.collect { updateAlarmStatus() }
+                }
+                launch {
+                    StepTracker.availability.collect { updateAlarmStatus() }
                 }
                 launch {
                     MetronomeEngine.running.collect { updateAlarmStatus() }
@@ -305,13 +317,28 @@ class MainActivity : AppCompatActivity() {
         val isSlow = StepTracker.isSlowForLongTime.value
         val sec = StepTracker.alarmProgressSec.value
         val running = MetronomeEngine.running.value
+        val state = StepTracker.trackerState.value
+        val avail = StepTracker.availability.value
 
-        if (!running || target <= 0) {
+        if (running && avail != StepTracker.Availability.OK) {
+            alarmStatusText.text = "步频检测不可用（" + when (avail) {
+                StepTracker.Availability.NO_PERMISSION -> "缺活动识别权限"
+                StepTracker.Availability.NO_SENSOR -> "无计步传感器"
+                else -> "传感器注册失败"
+            } + "）"
+            alarmStatusText.setTextColor(ContextCompat.getColor(this, android.R.color.darker_gray))
+        } else if (!running || target <= 0) {
             alarmStatusText.text = "就绪"
             alarmStatusText.setTextColor(ContextCompat.getColor(this, android.R.color.darker_gray))
         } else if (isSlow) {
             alarmStatusText.text = "⚠️ 偏慢报警中 (长音)"
             alarmStatusText.setTextColor(ContextCompat.getColor(this, android.R.color.holo_red_light))
+        } else if (state == CadenceStateMachine.State.WARMING_UP) {
+            alarmStatusText.text = "等待步伐数据…（未开始跑步不报警）"
+            alarmStatusText.setTextColor(ContextCompat.getColor(this, android.R.color.darker_gray))
+        } else if (state == CadenceStateMachine.State.STALE) {
+            alarmStatusText.text = "步伐停止/严重掉速"
+            alarmStatusText.setTextColor(ContextCompat.getColor(this, android.R.color.holo_orange_light))
         } else if (sec > 0) {
             alarmStatusText.text = "偏慢警告 (${sec}s/5s)"
             alarmStatusText.setTextColor(ContextCompat.getColor(this, android.R.color.holo_orange_light))

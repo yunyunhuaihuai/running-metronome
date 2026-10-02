@@ -1,6 +1,7 @@
 package com.metronome.app
 
 import android.content.Context
+import android.media.AudioFormat
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
@@ -119,6 +120,11 @@ object SoundBank {
                 val mime = format.getString(MediaFormat.KEY_MIME)!!
                 var srcRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
                 var srcCh = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+                // 部分解码器输出 float PCM（KEY_PCM_ENCODING 标识），不区分会读出噪声
+                var pcmEncoding =
+                    if (format.containsKey(MediaFormat.KEY_PCM_ENCODING))
+                        format.getInteger(MediaFormat.KEY_PCM_ENCODING)
+                    else AudioFormat.ENCODING_PCM_16BIT
                 val capSrcFrames = (srcRate * (MAX_CUSTOM_SECONDS + 1.0)).toInt()
                 val mono = ShortArray(capSrcFrames)
                 var frames = 0
@@ -152,16 +158,34 @@ object SoundBank {
                         if (outIdx >= 0) {
                             val ob = codec.getOutputBuffer(outIdx)!!
                             ob.order(ByteOrder.nativeOrder())
-                            val sb = ob.asShortBuffer()
-                            val n = sb.remaining() / srcCh
-                            if (n > 0) {
-                                val tmp = ShortArray(n * srcCh)
-                                sb.get(tmp)
-                                var p = 0
-                                for (i in 0 until n) {
-                                    var acc = 0
-                                    for (c in 0 until srcCh) acc += tmp[p++].toInt()
-                                    if (frames < capSrcFrames) mono[frames++] = (acc / srcCh).toShort()
+                            val n: Int
+                            if (pcmEncoding == AudioFormat.ENCODING_PCM_FLOAT) {
+                                val fb = ob.asFloatBuffer()
+                                n = fb.remaining() / srcCh
+                                if (n > 0) {
+                                    val tmp = FloatArray(n * srcCh)
+                                    fb.get(tmp)
+                                    var p = 0
+                                    for (i in 0 until n) {
+                                        var acc = 0f
+                                        for (c in 0 until srcCh) acc += tmp[p++]
+                                        val v = (acc / srcCh).coerceIn(-1f, 1f)
+                                        if (frames < capSrcFrames)
+                                            mono[frames++] = (v * 32767f).toInt().toShort()
+                                    }
+                                }
+                            } else {
+                                val sb = ob.asShortBuffer()
+                                n = sb.remaining() / srcCh
+                                if (n > 0) {
+                                    val tmp = ShortArray(n * srcCh)
+                                    sb.get(tmp)
+                                    var p = 0
+                                    for (i in 0 until n) {
+                                        var acc = 0
+                                        for (c in 0 until srcCh) acc += tmp[p++].toInt()
+                                        if (frames < capSrcFrames) mono[frames++] = (acc / srcCh).toShort()
+                                    }
                                 }
                             }
                             codec.releaseOutputBuffer(outIdx, false)
@@ -172,6 +196,9 @@ object SoundBank {
                             val of = codec.outputFormat
                             srcRate = of.getInteger(MediaFormat.KEY_SAMPLE_RATE)
                             srcCh = of.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+                            if (of.containsKey(MediaFormat.KEY_PCM_ENCODING)) {
+                                pcmEncoding = of.getInteger(MediaFormat.KEY_PCM_ENCODING)
+                            }
                         }
                     }
                 } finally {
