@@ -2,7 +2,7 @@
 # ============================================================
 # 节拍器自动化验证脚本（Git Bash / MSYS）
 # 前置：手机已连接授权、已安装本 App、深睡开关临时关闭（见最后注释）
-# 用法: bash test_metronome.sh [all|beats|lock|modes]
+# 用法: bash test_metronome.sh [all|beats|lock|modes|lifecycle]
 # ============================================================
 ADB="/d/AndroidStduio/Sdk/platform-tools/adb.exe"
 PKG="com.metronome.app"
@@ -118,12 +118,42 @@ test_modes() {
   if [ "$VIB" -gt 0 ]; then echo "结果: ✅ 振动有系统级证据"; else echo "结果: ⚠️ 未捕获到振动记录"; fi
 }
 
+# ---------------------------------------------------------- 测试 4: 服务生命周期
+test_lifecycle() {
+  echo "=== 测试 4: 连续启停服务后线程/WakeLock/MediaSession 无残留 ==="
+  start_at_120 false false
+  for i in 1 2 3 4 5; do
+    "$ADB" shell am broadcast -a "$PKG.debug.START" -n "$RCV" >/dev/null
+    sleep 3
+    "$ADB" shell am broadcast -a "$PKG.debug.STOP" -n "$RCV" >/dev/null
+    sleep 3
+    echo "-- 第 $i 次启停完成"
+  done
+  FAIL=0
+  PID=$("$ADB" shell pidof "$PKG" | tr -d '\r')
+  if [ -z "$PID" ]; then
+    echo "应用进程已退出，线程必然无残留"
+  else
+    VIB=$("$ADB" shell ps -T -p "$PID" 2>/dev/null | grep -c "metronome-vib" || true)
+    echo "metronome-vib 残留线程数: $VIB（期望 0）"
+    [ "$VIB" -eq 0 ] || FAIL=1
+  fi
+  WL=$("$ADB" shell dumpsys power 2>/dev/null | grep -ci "com.metronome.app" || true)
+  echo "dumpsys power 中本应用 WakeLock 残留: $WL（期望 0）"
+  [ "$WL" -eq 0 ] || FAIL=1
+  MS=$("$ADB" shell dumpsys media_session 2>/dev/null | grep -ci "Metronome" || true)
+  echo "dumpsys media_session 中本应用会话残留: $MS（期望 0）"
+  [ "$MS" -eq 0 ] || FAIL=1
+  if [ "$FAIL" -eq 0 ]; then echo "结果: ✅ 通过"; else echo "结果: ❌ 有残留"; fi
+}
+
 case "${1:-all}" in
   beats) test_beats ;;
   lock)  test_lock ;;
   modes) test_modes ;;
-  all)   test_beats; test_lock; test_modes ;;
-  *) echo "用法: bash test_metronome.sh [all|beats|lock|modes]" ;;
+  lifecycle) test_lifecycle ;;
+  all)   test_beats; test_lock; test_modes; test_lifecycle ;;
+  *) echo "用法: bash test_metronome.sh [all|beats|lock|modes|lifecycle]" ;;
 esac
 
 # ------------------------------------------------------------
