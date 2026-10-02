@@ -36,7 +36,11 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import java.util.concurrent.ConcurrentLinkedQueue
+import kotlin.math.PI
+import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.roundToInt
+import kotlin.math.sin
 import kotlin.math.sqrt
 
 /**
@@ -49,6 +53,9 @@ import kotlin.math.sqrt
  *
  * 振动 / UI 计数不依赖写入时机，而是由 AudioTrack 的 marker 回调在
  * "播放头真正到达该拍"时触发，与听到的声音对齐。
+ *
+ * 声音混入由 [PcmMixer] 完成：每个 beat 的整段 PCM 作为 voice 跨 block
+ * 连续播放，不会被 10ms block 边界截断。
  */
 class MetronomeService : Service() {
 
@@ -59,6 +66,11 @@ class MetronomeService : Service() {
 
         private const val BLOCK_FRAMES = 480   // 每次写入 10ms @48kHz
         private const val LEAD_FRAMES = 4800   // 启动/恢复后第一拍延迟 100ms
+
+        // 掉速长音：相位连续 + 短淡入淡出，进出报警无 click
+        private const val ALARM_FREQ = 440.0
+        private const val ALARM_GAIN = 0.3
+        private const val ALARM_FADE_SEC = 0.004
 
         private const val TAG = "MetronomeService"
 
@@ -75,6 +87,7 @@ class MetronomeService : Service() {
 
     private var track: AudioTrack? = null
     private var clockThread: ClockThread? = null
+    private var vibThread: HandlerThread? = null
 
     @Volatile
     private var serviceAlive = false
@@ -110,23 +123,63 @@ class MetronomeService : Service() {
         mediaSession?.setPlaybackState(buildPlaybackState(playing))
     }
 
-    // ---- 音频焦点：媒体应用标配（启动节拍时压掉其他音乐），也帮助系统把本应用识别为正在播放的媒体
+    // ---------------------------------------------------------------- 音频焦点
+    // 策略（针对"跑步时音乐 + 节拍器共存"设计）：
+    //  - 仅振动（soundOn=false）时从不申请焦点；
+    //  - 需要声音时申请 GAIN_TRANSIENT_MAY_DUCK（导航提示音同款语义）：
+    //    其他音乐 App 压低音量继续播放而不是被暂停，节拍声叠加其上；
+    //  - 申请失败或焦点被抢占（来电/其他独占音频）期间静音节拍声音
+    //    （时钟、振动、计数不受影响），收到 GAIN 即恢复；
+    //  - BPM=0 暂停或服务销毁时主动放弃焦点。
+    // 焦点被永久抢占（LOSS）后保持静音直到下一次节拍重启或开关切换，
+    // 不自动抢回焦点，避免与正在独占的应用来回拉锯。
+
     private var audioFocusRequest: AudioFocusRequest? = null
 
-    private fun requestAudioFocusIfNeeded() {
+    @Volatile
+    private var audioMutedByFocus = false
+
+    private val focusChangeListener = AudioManager.OnAudioFocusChangeListener { change ->
+        when (change) {
+            AudioManager.AUDIOFOCUS_LOSS,
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> audioMutedByFocus = true
+            AudioManager.AUDIOFOCUS_GAIN -> audioMutedByFocus = false
+        }
+    }
+
+    /** 声音是否此刻可出（用户开关 × 焦点状态）；音频线程逐 block 读取 */
+    private val playSoundAllowed: Boolean
+        get() = MetronomeEngine.soundOn.value && !audioMutedByFocus
+
+    /** 按当前状态申请/维持/放弃焦点；幂等，可在任意线程调用 */
+    private fun updateAudioFocus() {
+        val need = serviceAlive && MetronomeEngine.clockRunning.value && MetronomeEngine.soundOn.value
+        if (!need) {
+            abandonAudioFocus()
+            audioMutedByFocus = false
+            return
+        }
         if (audioFocusRequest != null) return
         val am = getSystemService(AudioManager::class.java) ?: return
-        val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+        val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
             .setAudioAttributes(
                 AudioAttributes.Builder()
                     .setUsage(AudioAttributes.USAGE_MEDIA)
                     .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
                     .build()
             )
-            .setOnAudioFocusChangeListener { }
+            .setOnAudioFocusChangeListener(focusChangeListener)
             .build()
         audioFocusRequest = req
-        am.requestAudioFocus(req)
+        val granted = try {
+            am.requestAudioFocus(req)
+        } catch (e: Exception) {
+            Log.w(TAG, "requestAudioFocus failed", e)
+            null
+        }
+        // 非 Granted（Failed/Delayed）期间不出声，等 GAIN 回调再恢复
+        audioMutedByFocus = granted != AudioManager.AUDIOFOCUS_REQUEST_GRANTED
     }
 
     private fun abandonAudioFocus() {
@@ -159,9 +212,8 @@ class MetronomeService : Service() {
         MetronomeEngine.running.value = true
         MetronomeEngine.beatCount.value = 0
         vibrator = getSystemService(Vibrator::class.java)
-        val vibThread = HandlerThread("metronome-vib")
-        vibThread.start()
-        vibHandler = Handler(vibThread.looper)
+        vibThread = HandlerThread("metronome-vib").also { it.start() }
+        vibHandler = Handler(vibThread!!.looper)
 
         createChannel()
         setupMediaSession()
@@ -193,8 +245,12 @@ class MetronomeService : Service() {
                 MetronomeEngine.bpm,
                 MetronomeEngine.soundOn,
                 MetronomeEngine.vibrateOn,
-                MetronomeEngine.vibrateStrength
-            ) { _, _, _, _ -> }.collect { updateNotification() }
+                MetronomeEngine.vibrateStrength,
+                MetronomeEngine.clockRunning
+            ) { _, _, _, _, _ -> }.collect {
+                updateAudioFocus()
+                updateNotification()
+            }
         }
         MetronomeEngine.logState("service-created")
     }
@@ -209,17 +265,24 @@ class MetronomeService : Service() {
 
     override fun onDestroy() {
         serviceAlive = false
+        // 先停时钟线程，避免它与随后的 track 释放并发使用 AudioTrack
+        clockThread?.let { t ->
+            try { t.join(1000) } catch (_: InterruptedException) {}
+        }
+        clockThread = null
+        try { track?.stop() } catch (_: IllegalStateException) {}
+        try { track?.release() } catch (_: Exception) {}
+        track = null
+        // 音频轨已释放，不会再有新的 marker 回调投递；
+        // 退出振动线程并丢弃队列中未处理的回调，防止其访问已释放的资源
+        vibThread?.quitSafely()
+        try { vibThread?.join(500) } catch (_: InterruptedException) {}
+        vibThread = null
         releaseCpuLock()
         abandonAudioFocus()
         try { mediaSession?.isActive = false } catch (_: Exception) {}
         try { mediaSession?.release() } catch (_: Exception) {}
         mediaSession = null
-        clockThread?.let { t ->
-            try { t.join(1000) } catch (_: InterruptedException) {}
-        }
-        try { track?.stop() } catch (_: IllegalStateException) {}
-        try { track?.release() } catch (_: Exception) {}
-        track = null
         StepTracker.stop()
         MetronomeEngine.running.value = false
         MetronomeEngine.clockRunning.value = false
@@ -286,6 +349,9 @@ class MetronomeService : Service() {
      * 脉宽 70..120ms——100% 时即为硬件能达到的最强单脉冲。
      * 不支持振幅控制的设备振幅恒定，只能用脉宽（70..180ms）以及在高档位
      * 叠加一次间隔 50ms 的双脉冲来增强体感。
+     *
+     * 必须在振动线程（vibHandler 对应 looper）上调用——marker 回调本身
+     * 就运行在该线程，直接振动即可，无需再 post 一次引入额外排队延迟。
      */
     private fun fireVibration() {
         val v = vibrator ?: return
@@ -307,12 +373,10 @@ class MetronomeService : Service() {
                 amplitudes = intArrayOf(0, -1)
             }
         }
-        vibHandler.post {
-            try {
-                v.vibrate(VibrationEffect.createWaveform(timings, amplitudes, -1))
-            } catch (e: Exception) {
-                Log.w(TAG, "vibrate failed", e)
-            }
+        try {
+            v.vibrate(VibrationEffect.createWaveform(timings, amplitudes, -1))
+        } catch (e: Exception) {
+            Log.w(TAG, "vibrate failed", e)
         }
     }
 
@@ -323,7 +387,11 @@ class MetronomeService : Service() {
     private inner class ClockThread : Thread("metronome-clock") {
         val pending = ConcurrentLinkedQueue<PendingBeat>()
         val markerLock = Any()
+        val mixer = PcmMixer(BLOCK_FRAMES)
         var markerArmed = false
+        // 报警长音的连续相位与增益状态（跨 block 保持，避免相位跳变 click）
+        var alarmPhase = 0.0
+        var alarmGain = 0.0
 
         override fun run() {
             Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
@@ -348,11 +416,12 @@ class MetronomeService : Service() {
                         try { t.pause() } catch (_: IllegalStateException) {}
                         nextBeat = -1.0
                         pending.clear()
+                        mixer.clear()
                         synchronized(markerLock) { markerArmed = false }
                         releaseCpuLock()
                         setMediaPlaying(false)
-                        abandonAudioFocus()
                         MetronomeEngine.clockRunning.value = false
+                        updateAudioFocus() // 不再需要声音 → 本线程同步放弃焦点
                         MetronomeEngine.logState("clock-paused(bpm=0)")
                     }
                     try { sleep(20) } catch (_: InterruptedException) { return }
@@ -366,55 +435,64 @@ class MetronomeService : Service() {
                     nextBeat = (written + LEAD_FRAMES).toDouble()
                     acquireCpuLock()
                     setMediaPlaying(true)
-                    requestAudioFocusIfNeeded()
                     MetronomeEngine.clockRunning.value = true
+                    updateAudioFocus() // 仅当需要声音时申请焦点；失败期间静音（第一拍前同步完成）
                     MetronomeEngine.logState("clock-start bpm=$bpmNow")
                 }
 
                 java.util.Arrays.fill(block, 0)
-                
-                // If slow for a long time, override beats with a continuous warning tone (e.g., 440Hz)
-                if (StepTracker.isSlowForLongTime.value && MetronomeEngine.soundOn.value) {
-                    val freq = 440.0
+
+                val playSound = playSoundAllowed
+                val alarmActive = StepTracker.isSlowForLongTime.value
+
+                // 排布本 block 内的节拍：无条件进入 pending（marker 驱动振动与计数），
+                // 声音部分整段 PCM 入 mixer，跨 block 连续播放
+                var beat = nextBeat
+                val framesPerBeat = 60.0 * MetronomeEngine.RATE / bpmNow
+                while (beat < written + BLOCK_FRAMES) {
+                    val startF = Math.round(beat)
+                    if (startF >= written) {
+                        if (!alarmActive && playSound) {
+                            val pcm = SoundBank.currentSound(
+                                MetronomeEngine.timbreIndex.value,
+                                MetronomeEngine.useCustomSound.value
+                            )
+                            mixer.addVoice(pcm, (startF - written).toInt())
+                            soundedSinceLog = true
+                        }
+                        pending.offer(PendingBeat(beatNum, startF))
+                        beatNum++
+                    }
+                    beat += framesPerBeat
+                }
+                nextBeat = beat
+
+                // 偏慢长音：目标增益 0/ALARM_GAIN 平滑过渡（4ms 淡入淡出），相位连续
+                val toneTarget = if (alarmActive && playSound) ALARM_GAIN else 0.0
+                if (toneTarget > 0.0 || alarmGain > 0.0) {
+                    val fadeStep = ALARM_GAIN / (ALARM_FADE_SEC * MetronomeEngine.RATE)
                     for (i in 0 until BLOCK_FRAMES) {
-                        val t = (written + i) / MetronomeEngine.RATE.toDouble()
-                        val v = kotlin.math.sin(2 * kotlin.math.PI * freq * t) * 0.3
-                        block[i] = (v * 32700.0).toInt().toShort()
-                    }
-                    var beat = nextBeat
-                    val framesPerBeat = 60.0 * MetronomeEngine.RATE / bpmNow
-                    while (beat < written + BLOCK_FRAMES) {
-                        val startF = Math.round(beat)
-                        if (startF >= written) {
-                            pending.offer(PendingBeat(beatNum, startF))
-                            beatNum++
+                        alarmPhase += 2.0 * PI * ALARM_FREQ / MetronomeEngine.RATE
+                        if (alarmPhase >= 2.0 * PI) alarmPhase -= 2.0 * PI
+                        alarmGain = when {
+                            alarmGain < toneTarget -> min(toneTarget, alarmGain + fadeStep)
+                            alarmGain > toneTarget -> max(0.0, alarmGain - fadeStep)
+                            else -> alarmGain
                         }
-                        beat += framesPerBeat
+                        block[i] = (sin(alarmPhase) * alarmGain * 32700.0)
+                            .toInt().coerceIn(-32768, 32767).toShort()
                     }
-                    nextBeat = beat
-                } else {
-                    var beat = nextBeat
-                    val framesPerBeat = 60.0 * MetronomeEngine.RATE / bpmNow
-                    while (beat < written + BLOCK_FRAMES) {
-                        val startF = Math.round(beat)
-                        if (startF >= written) {
-                            if (MetronomeEngine.soundOn.value) {
-                                val pcm = SoundBank.currentSound(
-                                    MetronomeEngine.timbreIndex.value,
-                                    MetronomeEngine.useCustomSound.value
-                                )
-                                mixIn(block, (startF - written).toInt(), pcm)
-                                soundedSinceLog = true
-                            }
-                            pending.offer(PendingBeat(beatNum, startF))
-                            beatNum++
-                        }
-                        beat += framesPerBeat
-                    }
-                    nextBeat = beat
                 }
 
-                val n = t.write(block, 0, BLOCK_FRAMES, AudioTrack.WRITE_BLOCKING)
+                mixer.mixInto(block)
+
+                val n = try {
+                    t.write(block, 0, BLOCK_FRAMES, AudioTrack.WRITE_BLOCKING)
+                } catch (e: Exception) {
+                    // onDestroy 释放 track 与本线程 write 并发时可能抛出；退出而非崩溃
+                    Log.e(TAG, "audio write exception", e)
+                    break
+                }
                 if (n < 0) {
                     Log.e(TAG, "audio write failed: $n")
                     break
@@ -447,17 +525,6 @@ class MetronomeService : Service() {
                 }
             }
             try { t.stop() } catch (_: IllegalStateException) {}
-        }
-
-        private fun mixIn(block: ShortArray, offset: Int, pcm: ShortArray) {
-            var bi = offset
-            var pi = 0
-            while (bi < BLOCK_FRAMES && pi < pcm.size) {
-                val v = block[bi] + pcm[pi].toInt()
-                block[bi] = v.coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
-                bi++
-                pi++
-            }
         }
     }
 
