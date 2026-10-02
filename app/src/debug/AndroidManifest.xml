@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 仅 debug 构建合并的 Manifest overlay：
+     DebugReceiver 是 ADB 自动化测试入口（START/STOP/SET/STATUS），
+     放在 src/debug 保证 release APK 中完全不存在该 exported receiver。 -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application>
+        <receiver
+            android:name=".DebugReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.metronome.app.debug.START" />
+                <action android:name="com.metronome.app.debug.STOP" />
+                <action android:name="com.metronome.app.debug.SET" />
+                <action android:name="com.metronome.app.debug.STATUS" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

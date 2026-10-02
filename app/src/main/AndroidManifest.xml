@@ -30,16 +30,6 @@
             android:exported="false"
             android:foregroundServiceType="mediaPlayback" />
 
-        <!-- 调试/自动化测试入口：adb shell am broadcast 控制（仅控制节拍器，无敏感权限） -->
-        <receiver
-            android:name=".DebugReceiver"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="com.metronome.app.debug.START" />
-                <action android:name="com.metronome.app.debug.STOP" />
-                <action android:name="com.metronome.app.debug.SET" />
-                <action android:name="com.metronome.app.debug.STATUS" />
-            </intent-filter>
-        </receiver>
+        <!-- 自动化测试入口组件仅在 debug 构建（见 src/debug source set 的 overlay 清单） -->
     </application>
 </manifest>
