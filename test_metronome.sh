@@ -94,6 +94,7 @@ test_modes() {
   "$ADB" shell cmd media_session volume --stream 3 --set 4 >/dev/null 2>&1
   start_at_120 false false
   "$ADB" shell am broadcast -a "$PKG.debug.SET" -n "$RCV" --ei bpm 60 >/dev/null
+  "$ADB" shell am broadcast -a "$PKG.debug.START" -n "$RCV" >/dev/null
   "$ADB" logcat -c
   ( "$ADB" logcat -s MetroState:I -s MetroSnd:I > "$OUT/modes.log" 2>&1 & )
   sleep 1
@@ -138,11 +139,15 @@ test_lifecycle() {
     echo "metronome-vib 残留线程数: $VIB（期望 0）"
     [ "$VIB" -eq 0 ] || FAIL=1
   fi
-  WL=$("$ADB" shell dumpsys power 2>/dev/null | grep -ci "com.metronome.app" || true)
-  echo "dumpsys power 中本应用 WakeLock 残留: $WL（期望 0）"
+  # 只检查"当前持有"列表（PARTIAL_WAKE_LOCK 段），dumpsys power 末尾的
+  # ACQ/REL 历史事件记录始终会包含本应用，不能作为残留依据
+  WL=$("$ADB" shell dumpsys power 2>/dev/null | grep -cE "PARTIAL_WAKE_LOCK.*com\.metronome\.app" || true)
+  echo "当前持有的本应用 WakeLock: $WL（期望 0）"
   [ "$WL" -eq 0 ] || FAIL=1
-  MS=$("$ADB" shell dumpsys media_session 2>/dev/null | grep -ci "Metronome" || true)
-  echo "dumpsys media_session 中本应用会话残留: $MS（期望 0）"
+  # 只检查活动会话记录（package/sessionTag/pid 形式）；
+  # "Audio playback 最近播放"排行列表会保留 uid 一段时间，不作依据
+  MS=$("$ADB" shell dumpsys media_session 2>/dev/null | grep -c "com\.metronome\.app/Metronome" || true)
+  echo "活动 MediaSession 会话记录: $MS（期望 0）"
   [ "$MS" -eq 0 ] || FAIL=1
   if [ "$FAIL" -eq 0 ]; then echo "结果: ✅ 通过"; else echo "结果: ❌ 有残留"; fi
 }
