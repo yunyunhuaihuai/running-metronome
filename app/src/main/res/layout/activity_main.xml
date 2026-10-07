@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:fillViewport="true"
@@ -11,6 +12,7 @@
         android:orientation="vertical"
         android:padding="20dp">
 
+        <!-- ============ 目标步频 ============ -->
         <TextView
             android:id="@+id/bpmText"
             android:layout_width="match_parent"
@@ -26,7 +28,7 @@
             android:layout_height="wrap_content"
             android:alpha="0.6"
             android:gravity="center"
-            android:text="@string/bpm_unit"
+            android:text="@string/target_spm_unit"
             android:textSize="14sp" />
 
         <com.google.android.material.slider.Slider
@@ -36,7 +38,7 @@
             android:layout_marginTop="12dp"
             android:stepSize="1"
             android:value="120"
-            android:valueFrom="0"
+            android:valueFrom="30"
             android:valueTo="200" />
 
         <LinearLayout
@@ -81,18 +83,35 @@
                 android:text="+5" />
         </LinearLayout>
 
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/btnPlay"
+        <!-- ============ 会话控制 ============ -->
+        <LinearLayout
             android:layout_width="match_parent"
-            android:layout_height="56dp"
+            android:layout_height="wrap_content"
             android:layout_marginTop="16dp"
-            android:text="@string/start"
-            android:textSize="18sp" />
+            android:orientation="horizontal">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnPlay"
+                android:layout_width="0dp"
+                android:layout_height="56dp"
+                android:layout_weight="2"
+                android:text="@string/start"
+                android:textSize="18sp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnStop"
+                style="?attr/materialButtonOutlinedStyle"
+                android:layout_width="0dp"
+                android:layout_height="56dp"
+                android:layout_marginStart="10dp"
+                android:layout_weight="1"
+                android:text="@string/stop" />
+        </LinearLayout>
 
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="20dp"
+            android:layout_marginTop="14dp"
             android:gravity="center_vertical"
             android:orientation="horizontal">
 
@@ -120,6 +139,22 @@
                 android:textSize="14sp" />
         </LinearLayout>
 
+        <TextView
+            android:id="@+id/sessionInfo"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:alpha="0.8"
+            android:textSize="13sp"
+            tools:text="已用 00:00 · 剩余 05:00" />
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_marginTop="16dp"
+            android:background="@color/divider" />
+
+        <!-- ============ 步频检测与报警状态 ============ -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -132,7 +167,7 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:text="实时步频: 0 SPM"
+                android:text="检测步频: --"
                 android:textSize="15sp"
                 android:textStyle="bold" />
 
@@ -140,20 +175,37 @@
                 android:id="@+id/alarmStatusText"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="正常"
+                android:gravity="end"
+                android:text="就绪"
                 android:textSize="14sp" />
         </LinearLayout>
-
-        <View
-            android:layout_width="match_parent"
-            android:layout_height="1dp"
-            android:layout_marginTop="20dp"
-            android:background="@color/divider" />
 
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
+            android:layout_marginTop="12dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/detect_switch"
+                android:textSize="16sp" />
+
+            <com.google.android.material.materialswitch.MaterialSwitch
+                android:id="@+id/swDetect"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:checked="true" />
+        </LinearLayout>
+
+        <!-- ============ 声音 ============ -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
             android:gravity="center_vertical"
             android:orientation="horizontal">
 
@@ -174,7 +226,223 @@
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:layout_marginStart="12dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:alpha="0.8"
+                android:text="@string/beat_volume"
+                android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/beatVolumeText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:alpha="0.7"
+                android:text="80%"
+                android:textSize="13sp" />
+        </LinearLayout>
+
+        <com.google.android.material.slider.Slider
+            android:id="@+id/sliderBeatVolume"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="-6dp"
+            android:stepSize="1"
+            android:value="80"
+            android:valueFrom="0"
+            android:valueTo="100" />
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_marginTop="12dp"
+            android:background="@color/divider" />
+
+        <!-- ============ 双脚音色 ============ -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="14dp"
+            android:text="@string/timbre_title"
+            android:textSize="16sp"
+            android:textStyle="bold" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/left_foot"
+                android:textSize="15sp" />
+
+            <Spinner
+                android:id="@+id/spinLeft"
+                android:layout_width="0dp"
+                android:layout_height="48dp"
+                android:layout_marginStart="10dp"
+                android:layout_weight="1" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnPreviewL"
+                style="?attr/materialButtonOutlinedStyle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:minWidth="0dp"
+                android:text="@string/preview" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <com.google.android.material.materialswitch.MaterialSwitch
+                android:id="@+id/swLCustom"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="4dp"
+                android:text="@string/left_use_custom"
+                android:textSize="14sp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnPickL"
+                style="?attr/materialButtonOutlinedStyle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:minWidth="0dp"
+                android:text="@string/pick_audio" />
+
+            <TextView
+                android:id="@+id/customNameL"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:layout_weight="1"
+                android:alpha="0.7"
+                android:ellipsize="end"
+                android:singleLine="true"
+                android:textSize="13sp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/right_foot"
+                android:textSize="15sp" />
+
+            <Spinner
+                android:id="@+id/spinRight"
+                android:layout_width="0dp"
+                android:layout_height="48dp"
+                android:layout_marginStart="10dp"
+                android:layout_weight="1" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnPreviewR"
+                style="?attr/materialButtonOutlinedStyle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:minWidth="0dp"
+                android:text="@string/preview" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <com.google.android.material.materialswitch.MaterialSwitch
+                android:id="@+id/swRCustom"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="4dp"
+                android:text="@string/right_use_custom"
+                android:textSize="14sp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnPickR"
+                style="?attr/materialButtonOutlinedStyle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:minWidth="0dp"
+                android:text="@string/pick_audio" />
+
+            <TextView
+                android:id="@+id/customNameR"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:layout_weight="1"
+                android:alpha="0.7"
+                android:ellipsize="end"
+                android:singleLine="true"
+                android:textSize="13sp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/channel_mode"
+                android:textSize="15sp" />
+
+            <Spinner
+                android:id="@+id/spinChannel"
+                android:layout_width="0dp"
+                android:layout_height="48dp"
+                android:layout_weight="2" />
+        </LinearLayout>
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_marginTop="12dp"
+            android:background="@color/divider" />
+
+        <!-- ============ 振动 ============ -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
             android:gravity="center_vertical"
             android:orientation="horizontal">
 
@@ -237,27 +505,14 @@
         <View
             android:layout_width="match_parent"
             android:layout_height="1dp"
-            android:layout_marginTop="20dp"
+            android:layout_marginTop="12dp"
             android:background="@color/divider" />
 
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
-            android:text="@string/timbre_title"
-            android:textSize="16sp"
-            android:textStyle="bold" />
-
-        <Spinner
-            android:id="@+id/spinnerTimbre"
-            android:layout_width="match_parent"
-            android:layout_height="48dp"
-            android:layout_marginTop="4dp" />
-
+        <!-- ============ 报警 ============ -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
+            android:layout_marginTop="12dp"
             android:gravity="center_vertical"
             android:orientation="horizontal">
 
@@ -265,14 +520,160 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:text="@string/custom_audio"
+                android:text="@string/alarm_switch"
                 android:textSize="16sp" />
 
             <com.google.android.material.materialswitch.MaterialSwitch
-                android:id="@+id/swCustom"
+                android:id="@+id/swAlarm"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:checked="false" />
+                android:checked="true" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/alarmBox"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="12dp"
+            android:orientation="vertical">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:alpha="0.8"
+                    android:text="@string/alarm_style"
+                    android:textSize="14sp" />
+
+                <Spinner
+                    android:id="@+id/spinAlarmStyle"
+                    android:layout_width="0dp"
+                    android:layout_height="48dp"
+                    android:layout_weight="2" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/alarmAfterText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:alpha="0.8"
+                android:text="@string/alarm_after"
+                android:textSize="14sp" />
+
+            <com.google.android.material.slider.Slider
+                android:id="@+id/sliderAlarmAfter"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="-6dp"
+                android:stepSize="1"
+                android:value="5"
+                android:valueFrom="1"
+                android:valueTo="15" />
+
+            <TextView
+                android:id="@+id/slowMarginText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:alpha="0.8"
+                android:text="@string/alarm_slow_margin"
+                android:textSize="14sp" />
+
+            <com.google.android.material.slider.Slider
+                android:id="@+id/sliderSlowMargin"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="-6dp"
+                android:stepSize="1"
+                android:value="8"
+                android:valueFrom="4"
+                android:valueTo="20" />
+
+            <TextView
+                android:id="@+id/recoverText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:alpha="0.8"
+                android:text="@string/alarm_recover"
+                android:textSize="14sp" />
+
+            <com.google.android.material.slider.Slider
+                android:id="@+id/sliderRecover"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="-6dp"
+                android:stepSize="0.1"
+                android:value="0.6"
+                android:valueFrom="0.2"
+                android:valueTo="3" />
+
+            <TextView
+                android:id="@+id/repeatText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:alpha="0.8"
+                android:text="@string/alarm_repeat"
+                android:textSize="14sp" />
+
+            <com.google.android.material.slider.Slider
+                android:id="@+id/sliderRepeat"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="-6dp"
+                android:stepSize="1"
+                android:value="2"
+                android:valueFrom="1"
+                android:valueTo="10" />
+        </LinearLayout>
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_marginTop="12dp"
+            android:background="@color/divider" />
+
+        <!-- ============ 训练 ============ -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="14dp"
+            android:text="@string/training_title"
+            android:textSize="16sp"
+            android:textStyle="bold" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/timer_switch"
+                android:textSize="15sp" />
+
+            <com.google.android.material.materialswitch.MaterialSwitch
+                android:id="@+id/swTimer"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+
+            <EditText
+                android:id="@+id/timerMinutes"
+                android:layout_width="90dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="10dp"
+                android:hint="分"
+                android:importantForAutofill="no"
+                android:inputType="number"
+                android:textSize="14sp" />
         </LinearLayout>
 
         <LinearLayout
@@ -282,23 +683,184 @@
             android:gravity="center_vertical"
             android:orientation="horizontal">
 
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/prepare_seconds"
+                android:textSize="15sp" />
+
+            <EditText
+                android:id="@+id/prepareSeconds"
+                android:layout_width="90dp"
+                android:layout_height="wrap_content"
+                android:hint="0"
+                android:importantForAutofill="no"
+                android:inputType="number"
+                android:textSize="14sp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/segments_switch"
+                android:textSize="15sp" />
+
+            <com.google.android.material.materialswitch.MaterialSwitch
+                android:id="@+id/swSegments"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+
             <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnPick"
+                android:id="@+id/btnAddSeg"
                 style="?attr/materialButtonOutlinedStyle"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="@string/pick_audio" />
+                android:layout_marginStart="10dp"
+                android:minWidth="0dp"
+                android:text="@string/seg_add" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/segList"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:orientation="vertical" />
+
+        <TextView
+            android:id="@+id/planSummary"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:alpha="0.7"
+            android:textSize="13sp" />
+
+        <LinearLayout
+            android:id="@+id/loopBox"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
 
             <TextView
-                android:id="@+id/customName"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/loop_from"
+                android:textSize="14sp" />
+
+            <EditText
+                android:id="@+id/loopFrom"
+                android:layout_width="64dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="4dp"
+                android:importantForAutofill="no"
+                android:inputType="number"
+                android:textSize="14sp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:text="@string/loop_to"
+                android:textSize="14sp" />
+
+            <EditText
+                android:id="@+id/loopTo"
+                android:layout_width="64dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="4dp"
+                android:importantForAutofill="no"
+                android:inputType="number"
+                android:textSize="14sp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:text="@string/loop_rounds"
+                android:textSize="14sp" />
+
+            <EditText
+                android:id="@+id/loopRounds"
+                android:layout_width="64dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="4dp"
+                android:importantForAutofill="no"
+                android:inputType="number"
+                android:text="3"
+                android:textSize="14sp" />
+        </LinearLayout>
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_marginTop="12dp"
+            android:background="@color/divider" />
+
+        <!-- ============ 预设 ============ -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="14dp"
+            android:text="@string/preset_title"
+            android:textSize="16sp"
+            android:textStyle="bold" />
+
+        <Spinner
+            android:id="@+id/spinPreset"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:layout_marginTop="6dp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:orientation="horizontal">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnPresetSave"
+                style="?attr/materialButtonOutlinedStyle"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
-                android:layout_marginStart="10dp"
+                android:layout_marginEnd="4dp"
                 android:layout_weight="1"
-                android:alpha="0.7"
-                android:ellipsize="end"
-                android:singleLine="true"
-                android:textSize="14sp" />
+                android:text="@string/preset_save" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnPresetApply"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="4dp"
+                android:layout_weight="1"
+                android:text="@string/preset_apply" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnPresetUpdate"
+                style="?attr/materialButtonOutlinedStyle"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="4dp"
+                android:layout_weight="1"
+                android:text="@string/preset_update" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnPresetDelete"
+                style="?attr/materialButtonOutlinedStyle"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/preset_delete" />
         </LinearLayout>
 
         <Space

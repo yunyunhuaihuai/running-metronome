@@ -1,22 +1,77 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">节拍器</string>
-    <string name="bpm_unit">BPM（0 = 停止）</string>
-    <string name="start">启动节拍器</string>
+    <string name="start">开始训练</string>
+    <string name="pause">暂停</string>
+    <string name="resume">继续</string>
     <string name="stop">停止</string>
+    <string name="stop_action">停止</string>
+    <string name="notif_pause">暂停</string>
+    <string name="notif_resume">继续</string>
+    <string name="notif_recover_sound">恢复声音</string>
+
+    <string name="target_spm_unit">SPM（目标步频 · 点击输入）</string>
     <string name="sound">声音</string>
     <string name="vibrate">振动</string>
     <string name="vib_strength">强度</string>
     <string name="vib_strength_fmt">%d%%</string>
     <string name="vib_strength_max">100%（最强）</string>
-    <string name="timbre_title">音色</string>
-    <string name="custom_audio">自定义音频</string>
-    <string name="pick_audio">选择音频文件…</string>
+    <string name="beat_volume">节拍音量（独立于系统媒体音量）</string>
+
     <string name="status_idle">未运行</string>
-    <string name="status_running">运行中</string>
-    <string name="status_paused">已暂停（BPM=0）</string>
-    <string name="beats_fmt">已打 %d 拍</string>
-    <string name="beats_zero">已打 0 拍</string>
+    <string name="status_running">训练中</string>
+    <string name="status_paused">已暂停 · 进度保留</string>
+    <string name="status_finished">训练完成</string>
+    <string name="status_preparing">准备开始…</string>
+    <string name="beats_fmt">已打拍数 %d</string>
+    <string name="beats_zero">已打拍数 0</string>
+
+    <string name="detected_cadence">检测步频</string>
+    <string name="left_foot">左脚</string>
+    <string name="right_foot">右脚</string>
+    <string name="channel_mode">声道模式</string>
+    <string name="chan_center">居中（双耳）</string>
+    <string name="chan_alternate">左右声道交替</string>
+    <string name="preview">试听</string>
+    <string name="custom_audio">自定义音频</string>
+    <string name="pick_audio">选择文件…</string>
+    <string name="timbre_title">音色</string>
+    <string name="left_use_custom">左脚用自定义</string>
+    <string name="right_use_custom">右脚用自定义</string>
+
+    <string name="detect_switch">步频检测</string>
+    <string name="alarm_switch">掉速报警</string>
+    <string name="alarm_title">报警设置</string>
+    <string name="alarm_style">报警方式</string>
+    <string name="alarm_style_overlay">节拍 + 间隔短提示（默认）</string>
+    <string name="alarm_style_long">长音（替代节拍）</string>
+    <string name="alarm_after">偏慢触发持续</string>
+    <string name="alarm_slow_margin">偏慢判定余量</string>
+    <string name="alarm_recover">恢复确认</string>
+    <string name="alarm_repeat">提示间隔</string>
+
+    <string name="training_title">训练</string>
+    <string name="timer_switch">定时结束</string>
+    <string name="timer_minutes">总时长（分钟）</string>
+    <string name="prepare_seconds">准备倒计时（秒，0 = 关）</string>
+    <string name="segments_switch">分段训练</string>
+    <string name="seg_duration">时长(s)</string>
+    <string name="seg_spm">SPM</string>
+    <string name="seg_add">添加段</string>
+    <string name="loop_hint">循环范围（段序号 1 起）与轮数</string>
+    <string name="loop_from">起段</string>
+    <string name="loop_to">止段</string>
+    <string name="loop_rounds">轮数</string>
+    <string name="plan_summary">计划总时长</string>
+
+    <string name="preset_title">预设</string>
+    <string name="preset_save">存为预设</string>
+    <string name="preset_apply">应用</string>
+    <string name="preset_update">更新</string>
+    <string name="preset_delete">删除</string>
+    <string name="preset_name_hint">预设名称</string>
+
     <string name="notif_channel">节拍器后台服务</string>
-    <string name="stop_action">停止</string>
+    <string name="dialog_input_spm">输入目标步频（%1$d–%2$d SPM）</string>
+    <string name="invalid_input">数值无效</string>
 </resources>

@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- 仅 debug 构建合并的 Manifest overlay：
-     DebugReceiver 是 ADB 自动化测试入口（START/STOP/SET/STATUS），
-     放在 src/debug 保证 release APK 中完全不存在该 exported receiver。 -->
+     DebugReceiver 是 ADB 自动化测试入口（START/PAUSE/RESUME/STOP/SET/STATUS/INJECT/INJECT_STOP/DUCK），
+     DuckProbeActivity 是压低链路验证用的最小播放端。
+     放在 src/debug 保证 release APK 中完全不存在这些组件。 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <application>
@@ -10,10 +11,20 @@
             android:exported="true">
             <intent-filter>
                 <action android:name="com.metronome.app.debug.START" />
+                <action android:name="com.metronome.app.debug.PAUSE" />
+                <action android:name="com.metronome.app.debug.RESUME" />
                 <action android:name="com.metronome.app.debug.STOP" />
                 <action android:name="com.metronome.app.debug.SET" />
                 <action android:name="com.metronome.app.debug.STATUS" />
+                <action android:name="com.metronome.app.debug.INJECT" />
+                <action android:name="com.metronome.app.debug.INJECT_STOP" />
+                <action android:name="com.metronome.app.debug.DUCK" />
             </intent-filter>
         </receiver>
+
+        <activity
+            android:name=".DuckProbeActivity"
+            android:exported="false"
+            android:label="DuckProbe" />
     </application>
 </manifest>

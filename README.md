@@ -1,6 +1,6 @@
 # 跑步节拍器 (Running Metronome)
 
-专为跑者步频控制与节奏训练设计的轻量级、高精度 Android 节拍器应用。
+专为跑者步频控制与节奏训练设计的轻量级、离线 Android 节拍器应用。
 
 <p align="center">
   <img src="docs/images/metro_ui.png" alt="Running Metronome UI" width="320"/>
@@ -8,21 +8,54 @@
 
 ---
 
-## 🌟 核心特性
+## 🌟 核心特性（v2.0）
 
-- **硬件级零漂移采样时钟**：
-  - 区别于普通应用使用 `Handler` 或 `Timer` 带来的系统级计时抖动，本项目采用 `AudioTrack` 的 PCM 采样帧计数驱动节拍（48kHz 采样率），步频间隔与音频硬件物理时钟绝对对齐，零漂移、零累积误差。
-- **全天候后台与锁屏保活**：
-  - 基于 Android 前台服务（`mediaPlayback`）与 `MediaSession`，搭配精准 `WakeLock` 管理，实测有效抵御 ColorOS / 国产深度定制系统的睡眠冻结机制。
-- **实时步频（SPM）精准检测**：
-  - 接入硬件底层 `Sensor.TYPE_STEP_DETECTOR` 步数中断，利用硬件纳秒时间戳（`event.timestamp`）与滤波窗口，实时计算跑者当前真实步频。
-- **掉速智能长音预警机制**：
-  - 当跑者实际步频明显落后于设定目标步频达 5 秒以上时，节拍声自动无缝切换为 440Hz 连续正弦长音提醒；当跑者提速跟上目标节奏后，瞬间解除报警并恢复清脆节拍。
-- **丰富的触觉与听觉反馈**：
-  - 内置 4 种经典合成音色（咔嗒、哔声、木鱼、牛铃）以及自定义音频导入。
-  - 支持线性马达振动波形调节（`VibrationEffect` 振幅与脉宽控制）。
-- **实时显示与交互**：
-  - 界面直观展示实时步频、节拍进度及预警状态。
+- **采样时钟驱动的节拍**：
+  - 节拍由 `AudioTrack` 的 PCM 采样帧定位（48kHz，双耳/立体声输出），每拍按
+    流内绝对帧号精确落点，不依赖 Handler 定时；间隔与音频硬件时钟对齐，
+    无累积漂移。
+- **训练会话**：
+  - 明确的会话状态（准备中/训练中/已暂停/已完成/错误）；暂停冻结计时且
+    保留进度，停止才清空；前台服务持有会话，息屏、切走后持续运行。
+  - 定时训练与分段训练两个独立开关：普通正计时 / 定时结束 / 分段计划 /
+    分段+定时硬上限。分段支持"只循环指定连续段"（热身、冷身各一次）、
+    每段独立时长与目标步频、准备倒计时（不计入训练时长）。
+  - 训练进度由可测试的单调时钟状态模型推导（`core/` 纯 Kotlin，JVM 单元
+    测试覆盖），长间隔调度后一次评估即可跨多段正确定位。
+- **左右脚独立音色**：
+  - 左右脚可分别选择内置音色或各自导入自定义音频；支持居中（双耳，默认）
+    与左右声道交替两种模式；交替顺序会话内确定（左脚先），暂停/恢复保留。
+  - 自定义音频以稳定资源 id 存入 App 私有目录，重启后仍可用；导入有
+    加载中/成功/失败状态，失败时明确提示并回退内置音色。
+- **节拍独立音量与试听**：
+  - 节拍音量独立于系统媒体音量（音乐音量不受影响）；任意音色/自定义音频
+    可试听，试听走与正式播放相同的音色解析、音量与最终化处理，不改会话、
+    不计拍数、播完自动释放资源。
+- **掉速报警（响应优先）**：
+  - 检测与报警独立开关；报警基于"累计偏慢"模型（持续慢于目标-余量累计
+    达到配置时长触发，死区冻结不清零，恢复确认后解除）。
+  - 步频估计使用最近 3 个步间隔的中位数（浮点、无截断偏差），步频阶跃后
+    2~3 个新间隔内跟随新值（旧版 10 步平均窗口需 ~9 个间隔）。
+  - 报警解除有独立确认 deadline：恢复条件达成 600ms（可调）即解除并停止
+    后续短提示，不等下一步点、不等下一轮提示周期。
+  - 默认报警方式为"保留节拍 + 间隔叠加短提示"，可选长音模式（替代节拍）。
+  - 报警事件时间与处理时间分离，迟到/批量步点不误判；无数据、无权限、
+    无传感器绝不误报。
+- **与音乐共存**：
+  - 节拍以 `AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK` 申请焦点：支持 duck 的
+    播放器整体压低音量、不被暂停；节拍停止/暂停/声音关闭后音乐恢复。
+  - 焦点被临时中断时明确显示"声音被中断"（训练计时不受影响）；被永久
+    抢占时静音并提供恢复入口，不自动反复抢焦点。
+  - 注：压低与否由系统和其他播放器决定，本 App 不能强制控制其他应用音量。
+- **通知栏与锁屏控制**：
+  - 通知提供暂停/继续、停止、±5 SPM；MediaSession 统一同一套会话命令，
+    系统/锁屏媒体控制的播放/暂停/停止真实生效。
+- **命名预设**：
+  - 完整配置（步频、音量、双脚音色与资源、振动、报警、训练计划）可保存
+    为命名预设，支持新增/改名(通过重建)/应用/更新/删除；应用预设不启动
+    训练、不清空运行中会话。
+- **触觉反馈**：
+  - 振动开关与强度调节（支持振幅控制的设备映射振幅，否则脉宽/双脉冲）。
 
 ---
 
@@ -30,20 +63,25 @@
 
 - **最低支持**：Android 8.0 (API 26) 及以上
 - **推荐系统**：Android 14 / Android 15
-- **重点实测机型**：OnePlus 13 (PJZ110, Snapdragon 8 Elite, ColorOS 15)
+- **重点待测机型**：OnePlus 13 (PJZ110, Snapdragon 8 Elite, ColorOS 15)
+
+> v2.0 的全部改动已在模拟器（API 35 x86_64）完成构建、单元测试与运行验证；
+> 真实跑步步点、OnePlus 13 传感器延迟、ColorOS 息屏策略、蓝牙双耳链路、
+> 扬声器听感等项留待真机验证，见《真机测试指南》。
 
 ---
 
 ## 🛠️ 构建与安装
 
-### 命令行编译
-
 ```bash
-# 编译 Debug APK
-./gradlew assembleDebug
+# JVM 单元测试（核心逻辑：估计器/状态机/时间线/混音/渲染/编解码）
+./gradlew.bat testDebugUnitTest
+
+# 编译 APK
+./gradlew.bat assembleDebug assembleRelease
 
 # 安装到连接的设备
-adb install -r -g app/build/outputs/apk/debug/app-debug.apk
+adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
 ---
@@ -52,15 +90,42 @@ adb install -r -g app/build/outputs/apk/debug/app-debug.apk
 
 ```text
 com.metronome.app/
-├── MainActivity.kt        # 主界面交互与实时状态观察
-├── MetronomeService.kt    # 前台音频时钟服务与长音混音引擎
-├── MetronomeEngine.kt     # 核心状态流与参数单例管理
-├── StepTracker.kt         # 硬件步数检测、纳秒级 SPM 计算与迟滞预警状态机
-└── SoundBank.kt           # PCM 合成音色库与自定义音频解码
+├── core/                    # 纯 Kotlin 核心（无 Android 依赖，JVM 可测试）
+│   ├── TrainingCore.kt      #   训练计划模型 + 时间线定位（分段/循环/上限）
+│   ├── SessionCore.kt       #   会话状态机（准备/运行/暂停/完成，注入时钟）
+│   ├── CadenceCore.kt       #   步频估计器 + 检测/报警状态机
+│   ├── BlockRenderer.kt     #   10ms 块渲染：双脚音色/声道/报警提示/门控/限幅
+│   ├── PcmMixer.kt          #   跨块宽位混音器（组淡出）
+│   └── Codecs.kt            #   预设/训练配置序列化
+├── MainActivity.kt          # 界面：目标/检测/双脚音色/报警/训练/预设
+├── MetronomeService.kt      # 前台服务：控制线程 + 音频线程 + 振动线程
+├── MetronomeEngine.kt       # 全局设置与状态单例（持久化/迁移/预设）
+├── StepTracker.kt           # 传感器接入层（统一检测快照发布、debug 注入）
+├── SoundBank.kt             # 内置音色合成 + 自定义解码 + 私有资源存储
+├── AudioImporter.kt         # 导入管线（请求序号/加载状态/旧版迁移）
+└── PreviewManager.kt        # 试听播放器（与正式播放同一处理路径）
 ```
+
+### 线程与职责
+
+- `metronome-ctl`（控制线程）：会话命令、音频焦点、通知、MediaSession、
+  会话计时 tick 全部串行于此；焦点 API 不在音频线程调用。
+- `metronome-clock`（音频线程）：持有 AudioTrack 生命周期，逐块渲染写入；
+  以实际写入帧数推进内容时间线；部分写入保留重写；可恢复错误有限次重建。
+- `metronome-vib`（振动线程）：marker 回调驱动振动与计数，与听感对齐。
 
 ---
 
 ## 📄 开源许可
 
 本项目遵循 MIT 协议开源。
+
+## 🙏 参考与致谢
+
+音频/训练状态机设计参考了以下开源项目（仅借鉴思路与局部实现，未整仓复制）：
+[GOTronome](https://github.com/depasca/GOTronome)（MIT） StrikePool/Voices 的
+余音跨块与包络思路；[timer-machine-android](https://github.com/timer-machine/timer-machine-android)
+（GPL-3.0） 分段/循环组的状态转移思路（结构理解后自行实现，未移入其源码）；
+[Metronome-Android](https://github.com/fennifith/Metronome-Android)（Apache-2.0）
+命令入口与 BPM 收藏交互；[RunningCadence](https://github.com/aleung/RunningCadence)
+（Apache-2.0） 提醒间隔设计反例。详见交付报告《参考与复用说明》。
