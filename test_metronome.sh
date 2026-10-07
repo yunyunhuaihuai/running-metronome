@@ -182,7 +182,7 @@ test_training() {
   # 期望：约 2s 后开始，A/B 交替、目标随段切换；20s 时到点结束（FINISHED），节拍停止
   start_at_120 false false
   A shell am broadcast -a "$PKG.debug.SET" -n "$RCV" --ez timer true --ei totalSec 20 \
-      --ei prepareSec 2 --ez segments true --ei segDurs "6,6" --ei segSpms "140,160" \
+      --ei prepareSec 2 --ez segments true --es segDurs "6,6" --es segSpms "140,160" \
       --ei loopFrom 0 --ei loopTo 1 --ei loopRounds 2 >/dev/null
   capture "$OUT/training.log" "MetroState:I" "MetroBeat:I"
   start_session

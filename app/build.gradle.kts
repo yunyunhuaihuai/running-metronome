@@ -32,6 +32,12 @@ android {
     buildFeatures {
         buildConfig = true
     }
+    testOptions {
+        unitTests.all {
+            // 透传可选的 WAV 渲染输出目录（未指定时 WavRenderToolTest 自行跳过）
+            it.systemProperty("render.wav.out", System.getProperty("render.wav.out"))
+        }
+    }
 }
 
 kotlin {

@@ -35,6 +35,10 @@ object PreviewManager {
         if (pcm.isEmpty()) return
         val volume = MetronomeEngine.beatVolume.value / 100f
         val focusOwnedByService = MetronomeEngine.running.value
+        android.util.Log.i(
+            "MetroPreview",
+            "preview foot=$foot vol=${(volume * 100).toInt()}% focusByService=$focusOwnedByService"
+        )
 
         thread = HandlerThread("metronome-preview").also { it.start() }
         val handler = Handler(thread!!.looper)

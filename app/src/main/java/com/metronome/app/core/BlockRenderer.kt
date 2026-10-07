@@ -85,7 +85,7 @@ class BlockRenderer(
     /** 是否还有待播/未播完的声音（结束提示收尾判定用） */
     fun hasActiveSound(): Boolean = mixer.activeVoices > 0 || pendingOneShots.isNotEmpty()
 
-    /** 重置全部调度状态（服务停止/重建轨道时调用） */
+    /** 重置全部调度状态（会话启动/轨道重建时调用：拍号清零、左脚先） */
     fun reset() {
         mixer.clear()
         pendingOneShots.clear()
@@ -95,6 +95,20 @@ class BlockRenderer(
         footPhase = Foot.LEFT
         nextPromptAt = -1L
         alarmPhase = 0.0
+        alarmGain = 0.0
+        gate = 0f
+    }
+
+    /**
+     * 暂停后恢复：清理已排队声部并重排节拍基准，但保留拍数与交替相位
+     * （已确认需求：暂停不销毁进度、恢复保留交替顺序）。
+     */
+    fun resetForResume() {
+        mixer.clear()
+        pendingOneShots.clear()
+        nextBeat = -1.0
+        lastSpm = -1
+        nextPromptAt = -1L
         alarmGain = 0.0
         gate = 0f
     }

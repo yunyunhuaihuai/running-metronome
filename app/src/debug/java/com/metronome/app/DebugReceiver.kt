@@ -148,6 +148,9 @@ class DebugReceiver : BroadcastReceiver() {
                 startInjection(spm, durationMs)
             }
             "com.metronome.app.debug.INJECT_STOP" -> stopInjection()
+            "com.metronome.app.debug.ADJUST" -> {
+                MetronomeService.adjustTarget(context, intent.getIntExtra("delta", 0))
+            }
             "com.metronome.app.debug.DUCK" -> {
                 context.startActivity(
                     Intent(context, DuckProbeActivity::class.java)

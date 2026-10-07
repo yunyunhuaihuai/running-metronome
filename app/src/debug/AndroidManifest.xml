@@ -18,13 +18,15 @@
                 <action android:name="com.metronome.app.debug.STATUS" />
                 <action android:name="com.metronome.app.debug.INJECT" />
                 <action android:name="com.metronome.app.debug.INJECT_STOP" />
+                <action android:name="com.metronome.app.debug.ADJUST" />
                 <action android:name="com.metronome.app.debug.DUCK" />
             </intent-filter>
         </receiver>
 
+        <!-- exported=true 仅为 adb 测试启动需要；本组件只存在于 debug 构建 -->
         <activity
             android:name=".DuckProbeActivity"
-            android:exported="false"
+            android:exported="true"
             android:label="DuckProbe" />
     </application>
 </manifest>

@@ -384,7 +384,7 @@ class MetronomeService : Service() {
 
     private fun cmdResume() {
         if (!session.resume()) return
-        renderer.reset()
+        renderer.resetForResume()
         currentTargetSpm = MetronomeEngine.targetSpm.value
         renderActive = true
         acquireCpuLock()

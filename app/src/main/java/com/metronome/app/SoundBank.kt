@@ -145,14 +145,17 @@ object SoundBank {
     private fun render(seconds: Double, f: (Double) -> Double): ShortArray {
         val n = (seconds * RATE).roundToInt()
         val out = ShortArray(n)
+        val tailStart = n - (0.003 * RATE).roundToInt()
         for (i in 0 until n) {
             val t = i / RATE.toDouble()
             var v = f(t).coerceIn(-1.0, 1.0)
-            // 末尾 3ms 线性淡出到零：消除音色收尾的非零跳变 click
-            val tailStart = n - (0.003 * RATE).roundToInt()
-            if (i >= tailStart) v *= (n - i).toDouble() / (n - tailStart).toDouble()
+            // 末尾 3ms 线性淡出到零（最后样本严格为 0）：消除音色收尾的非零跳变 click
+            if (i >= tailStart) {
+                v *= (n - 1 - i).toDouble() / (n - 1 - tailStart).coerceAtLeast(1).toDouble()
+            }
             out[i] = (v * 32700.0).roundToInt().toShort()
         }
+        out[n - 1] = 0
         return out
     }
 
