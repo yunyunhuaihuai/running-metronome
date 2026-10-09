@@ -182,6 +182,43 @@ class BlockRendererTest {
     }
 
     @Test
+    fun `prompt result marks only PCM scheduled and one cancellation fade`() {
+        val r = renderer()
+        val out = ShortArray(frames * 2)
+        val active = snap(spm = 0, prompt = true)
+        val lead = r.renderBlock(0, active, out)
+        assertEquals("提示在下一块起音", null, lead.promptStartedAtFrame)
+        assertTrue(!lead.promptFadeRequested)
+
+        val submitted = r.renderBlock(frames.toLong(), active, out)
+        assertEquals(frames.toLong(), submitted.promptStartedAtFrame)
+        assertTrue("提示 PCM 已进入混音", submitted.peakL > 0)
+        assertTrue(!submitted.promptFadeRequested)
+
+        val inactive = snap(spm = 0, prompt = false)
+        val cancelled = r.renderBlock((frames * 2).toLong(), inactive, out)
+        assertEquals(null, cancelled.promptStartedAtFrame)
+        assertTrue("首次解除要求淡出", cancelled.promptFadeRequested)
+        val later = r.renderBlock((frames * 3).toLong(), inactive, out)
+        assertEquals(null, later.promptStartedAtFrame)
+        assertTrue("不重复报告淡出", !later.promptFadeRequested)
+    }
+
+    @Test
+    fun `missing prompt PCM does not report a submitted prompt`() {
+        val missing = object : BlockRenderer.SoundResolver {
+            override fun beatPcm(foot: BlockRenderer.Foot): ShortArray? = null
+            override fun promptPcm(): ShortArray? = null
+        }
+        val r = BlockRenderer(frames, rate, true, missing)
+        val out = ShortArray(frames * 2)
+        r.renderBlock(0, snap(spm = 0, prompt = true), out)
+        val result = r.renderBlock(frames.toLong(), snap(spm = 0, prompt = true), out)
+        assertEquals(null, result.promptStartedAtFrame)
+        assertEquals(0, result.peakL)
+    }
+
+    @Test
     fun `alarm long tone replaces beat sound`() {
         val sounds = FakeSounds()
         val r = BlockRenderer(frames, rate, true, sounds)

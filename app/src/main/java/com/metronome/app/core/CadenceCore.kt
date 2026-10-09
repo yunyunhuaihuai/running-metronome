@@ -9,6 +9,8 @@ package com.metronome.app.core
  *    的 9 个间隔快一个量级），单个异常间隔（漏步/双计/抖动）被中位数吸收；
  *  - 显示路径使用 [displaySpm]：对 medianSpm 做轻度 EMA（α=0.6），
  *    稳定段数字不跳动，收敛速度仍满足"5 个新间隔内进入新值 ±3 SPM"；
+ *  - 报警恢复使用 [recoverySpm]：4 个步间隔的总跨度均值，抑制相邻
+ *    event timestamp 正负抖动引起的恢复确认反复重置；
  *  - 全程 float，只在 UI 显示时取整，消除原 .toInt() 提前截断的低估偏差。
  *
  * 输入侧只接收已通过抖动过滤的步点事件时间（单调毫秒）。
@@ -22,6 +24,9 @@ class CadenceEstimator {
 
     /** 显示用：轻度平滑估计 */
     var displaySpm = 0f; private set
+
+    /** 报警恢复用：最近 4 个间隔的跨窗均值，抵消相邻步点的时间戳抖动。 */
+    var recoverySpm = 0f; private set
 
     /** 当前窗口内可用间隔数（诊断用） */
     var intervalCount = 0; private set
@@ -46,17 +51,28 @@ class CadenceEstimator {
         val spm = (60_000f / median).coerceIn(MIN_SPM_F, MAX_SPM_F)
         medianSpm = spm
         displaySpm = if (displaySpm <= 0f) spm else displaySpm * (1f - DISPLAY_ALPHA) + spm * DISPLAY_ALPHA
+
+        // 恢复确认比偏慢触发更需要稳定性。4 个间隔的总跨度只受两端
+        // 时间戳抖动影响，不会因中间每一步的正负抖动交替重启 600ms 确认。
+        // 漏步会压低此值而延后解除，避免假恢复。
+        recoverySpm = if (n >= RECOVERY_INTERVALS) {
+            val span = events.last() - events.first()
+            if (span > 0L) (60_000f * RECOVERY_INTERVALS / span).coerceIn(MIN_SPM_F, MAX_SPM_F)
+            else 0f
+        } else 0f
     }
 
     fun reset() {
         events.clear()
         medianSpm = 0f
         displaySpm = 0f
+        recoverySpm = 0f
         intervalCount = 0
     }
 
     companion object {
         private const val ESTIMATOR_WINDOW = 5   // 保留 5 个步点 = 4 个间隔供选择
+        private const val RECOVERY_INTERVALS = 4
         private const val DISPLAY_ALPHA = 0.6f
         private const val MIN_SPM_F = 30f
         private const val MAX_SPM_F = 240f
@@ -73,7 +89,7 @@ class CadenceEstimator {
  *  2. 新鲜度 deadline 与报警开关/报警状态解耦：只要检测在跑、有过步点，
  *     就会在 lastStep+超时 时刻被唤醒标记 STALE——报警已触发、报警关闭
  *     时同样生效（旧版 alarm latched 后不再安排任何 deadline）；
- *  3. 报警恢复有独立 deadline：恢复条件（≥ target-fastMargin）开始后
+ *  3. 报警恢复用独立的 4 间隔均值及 deadline：恢复条件（≥ target-fastMargin）开始后
  *     recoverMs 到点即解除，不等下一个步点，更不等一轮触发持续时间；
  *  4. 目标变化/新段/暂停恢复时调用 [onTargetChanged]：清空旧累计并进入
  *     短暂适应期（grace），不沿用旧目标的累计立刻误报；
@@ -107,6 +123,7 @@ class DetectorCore(
     var state = State.WARMING_UP; private set
     var cadenceSpm = 0f; private set      // 报警路径（快速中位数）
     var displaySpm = 0f; private set      // 显示路径（平滑）
+    val recoverySpm: Float get() = estimator.recoverySpm // 恢复确认路径（4 间隔均值）
     var slowAlarm = false; private set
     var slowProgressMs = 0L; private set  // 触发后冻结在 alarmAfterMs
     var everValid = false; private set
@@ -115,6 +132,7 @@ class DetectorCore(
     var alarmEnteredAtMs = 0L; private set
     var alarmExitedAtMs = 0L; private set
     var slowStartAtMs = 0L; private set   // 本段偏慢条件首次满足（处理时刻）
+    var alarmRecoveryStartAtMs = 0L; private set // 最近一次报警解除时的恢复确认起点
 
     private val estimator = CadenceEstimator()
     private var lastStepEventMs = 0L
@@ -159,6 +177,11 @@ class DetectorCore(
     }
 
     fun clearAlarmConditions() {
+        // 若报警被关闭或检测停止，不能把上一次正常恢复的诊断时刻误报为本次解除。
+        if (slowAlarm) {
+            alarmRecoveryStartAtMs = 0
+            alarmExitedAtMs = 0
+        }
         bankedMs = 0; slowSinceMs = 0; fastSinceMs = 0
         slowAlarm = false; slowProgressMs = 0
         slowStartAtMs = 0
@@ -174,6 +197,7 @@ class DetectorCore(
         slowAlarm = false; slowProgressMs = 0
         graceUntilMs = 0; lastEvalMs = 0
         alarmEnteredAtMs = 0; alarmExitedAtMs = 0; slowStartAtMs = 0
+        alarmRecoveryStartAtMs = 0
     }
 
     private fun evaluateAt(now: Long) {
@@ -189,7 +213,7 @@ class DetectorCore(
 
         if (slowAlarm) {
             // 已触发：只处理恢复方向，不再累计
-            if (state == State.VALID && cadenceSpm >= cfg.targetSpm - cfg.fastMarginSpm) {
+            if (state == State.VALID && estimator.recoverySpm >= cfg.targetSpm - cfg.fastMarginSpm) {
                 if (fastSinceMs == 0L) fastSinceMs = now
                 if (now - fastSinceMs >= cfg.recoverMs) recover(now)
             } else {
@@ -223,7 +247,7 @@ class DetectorCore(
                 fastSinceMs = 0
                 accrue(now)
             }
-            cad >= cfg.targetSpm - cfg.fastMarginSpm -> {
+            estimator.recoverySpm >= cfg.targetSpm - cfg.fastMarginSpm -> {
                 // 恢复方向：持续 recoverMs 后清空累计（未报警时也重置，避免跨死区继承）
                 if (fastSinceMs == 0L) fastSinceMs = now
                 pauseAccrual(now)
@@ -268,6 +292,8 @@ class DetectorCore(
         if (total >= config.alarmAfterMs) {
             slowAlarm = true
             alarmEnteredAtMs = now
+            alarmRecoveryStartAtMs = 0
+            alarmExitedAtMs = 0
             // 锁存后累计段结束：清 slowSince，避免 nextDeadlineMs 产生过期限 deadline
             slowSinceMs = 0
             bankedMs = config.alarmAfterMs
@@ -282,7 +308,9 @@ class DetectorCore(
     }
 
     private fun recover(now: Long) {
+        val recoveryStart = fastSinceMs
         clearAlarmConditions()
+        alarmRecoveryStartAtMs = recoveryStart
         alarmExitedAtMs = now
     }
 

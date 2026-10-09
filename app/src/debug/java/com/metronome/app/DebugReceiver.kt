@@ -31,6 +31,7 @@ class DebugReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         MetronomeEngine.init(context)
         when (intent.action) {
+            "com.metronome.app.debug.PROBE_STOP" -> DuckProbeActivity.finishForTest()
             "com.metronome.app.debug.START" -> MetronomeService.start(context)
             "com.metronome.app.debug.PAUSE" -> MetronomeService.pause(context)
             "com.metronome.app.debug.RESUME" -> MetronomeService.resume(context)

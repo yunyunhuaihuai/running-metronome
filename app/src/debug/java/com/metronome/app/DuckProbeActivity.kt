@@ -6,9 +6,11 @@ import android.media.AudioFocusRequest
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTrack
+import android.os.Build
 import android.os.Bundle
 import android.widget.LinearLayout
 import android.widget.TextView
+import java.lang.ref.WeakReference
 import kotlin.math.PI
 import kotlin.math.sin
 
@@ -50,6 +52,10 @@ class DuckProbeActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (Build.VERSION.SDK_INT >= 27) {
+            setShowWhenLocked(true) // 锁屏用例之后仍可由 ADB 重建受控播放端
+        }
+        active = WeakReference(this)
         val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(48, 96, 48, 48) }
         val title = TextView(this).apply {
             text = "DuckProbe：模拟音乐播放器（880Hz）\n焦点事件见 logcat -s MetroDuck"
@@ -130,10 +136,17 @@ class DuckProbeActivity : Activity() {
             } catch (_: Exception) {}
         }
         android.util.Log.i(TAG, "probe destroyed, focus abandoned")
+        if (active?.get() === this) active = null
         super.onDestroy()
     }
 
     companion object {
         private const val TAG = "MetroDuck"
+        private var active: WeakReference<DuckProbeActivity>? = null
+
+        /** 仅供 debug 广播测试使用；无需依赖锁屏上的返回键。 */
+        fun finishForTest() {
+            active?.get()?.finish()
+        }
     }
 }

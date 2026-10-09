@@ -9,8 +9,12 @@ import android.net.Uri
 import android.provider.OpenableColumns
 import android.util.Log
 import com.metronome.app.core.BlockRenderer
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import java.nio.ByteOrder
 import kotlin.math.PI
 import kotlin.math.exp
@@ -35,6 +39,9 @@ object SoundBank {
     const val RATE = MetronomeEngine.RATE
     const val MAX_CUSTOM_SECONDS = 3.0
     const val DECODE_TIMEOUT_MS = 10_000L
+    // 包括 RIFF 头、元数据与待读取的 PCM；拒绝伪造的巨型 chunk 和无限零长度 chunk 链。
+    private const val MAX_WAV_SCAN_BYTES = 64L * 1024 * 1024
+    private const val MAX_WAV_CHUNKS = 256
 
     @Volatile private var builtIns: Array<ShortArray>? = null
     @Volatile var leftPcm: ShortArray? = null
@@ -163,10 +170,205 @@ object SoundBank {
 
     /**
      * 解码任意音频 URI → 单声道 48kHz PCM16，最长 3 秒。
+     * 主路径 MediaExtractor/MediaCodec（系统支持的全部容器与编码）；
+     * 失败时回退手写 PCM WAV 解析（部分系统/模拟器缺 WAV 提取器）。
      * 失败返回 null（不抛出）。超时/取消由调用方通过协程取消 + 本函数的
      * 帧数上限与循环上限保证不无限阻塞。
      */
     suspend fun decodeCustom(context: Context, uri: Uri): ShortArray? =
+        withTimeout(DECODE_TIMEOUT_MS) { decodeCustomWithinTimeout(context, uri) }
+
+    private suspend fun decodeCustomWithinTimeout(context: Context, uri: Uri): ShortArray? {
+        val viaExtractor = decodeViaExtractor(context, uri)
+        if (viaExtractor != null) return viaExtractor
+        val coroutine = currentCoroutineContext()
+        coroutine.ensureActive()
+        Log.i(TAG, "extractor 路径失败/不支持，尝试 WAV 直接解析")
+        val wav = try {
+            val stream = context.contentResolver.openInputStream(uri)
+            if (stream == null) Log.w(TAG, "WAV 文件流无法打开")
+            stream?.use { input ->
+                parseWav(
+                    input,
+                    onReject = { reason -> Log.w(TAG, "WAV 解析拒绝：$reason") },
+                    checkActive = { coroutine.ensureActive() },
+                )
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "WAV 直接解析失败", e)
+            null
+        }
+        if (wav == null) {
+            Log.w(TAG, "WAV 直接解析未得到数据（非 PCM WAV 或流不可读）")
+            return null
+        }
+        val (mono, srcRate) = wav
+        if (mono.isEmpty() || srcRate <= 0) return null
+        Log.i(TAG, "WAV 解析成功：rate=$srcRate frames=${mono.size}")
+        return resample(mono, mono.size, srcRate, RATE)
+    }
+
+    /**
+     * 纯 WAV 解析（无 Android 依赖，可 JVM 单元测试）：
+     * 解析 RIFF/PCM WAV 流（8/16/24/32-bit 整型与 IEEE float，多声道混缩单声道），
+     * 返回 (单声道 PCM, 采样率)；非 PCM WAV / 截断流返回 null。
+     */
+    fun parseWav(
+        input: java.io.InputStream,
+        onReject: (String) -> Unit = {},
+        checkActive: () -> Unit = {},
+    ): Pair<ShortArray, Int>? {
+        fun reject(reason: String): Pair<ShortArray, Int>? {
+            onReject(reason)
+            return null
+        }
+        fun readFully(buf: ByteArray): Boolean {
+            var off = 0
+            while (off < buf.size) {
+                checkActive()
+                val n = input.read(buf, off, buf.size - off)
+                if (n < 0) return false
+                if (n == 0) {
+                    val one = input.read()
+                    if (one < 0) return false
+                    buf[off++] = one.toByte()
+                } else off += n
+            }
+            return true
+        }
+        fun skipFully(n: Long): Boolean {
+            var left = n
+            val skip = ByteArray(4096)
+            while (left > 0) {
+                checkActive()
+                val r = input.read(skip, 0, minOf(left, skip.size.toLong()).toInt())
+                if (r < 0) return false
+                if (r == 0) {
+                    if (input.read() < 0) return false
+                    left--
+                } else left -= r
+            }
+            return true
+        }
+        val riff = ByteArray(12)
+        if (!readFully(riff)) return reject("RIFF 头不足 12 字节")
+        if (!(riff[0] == 'R'.code.toByte() && riff[1] == 'I'.code.toByte() &&
+                riff[2] == 'F'.code.toByte() && riff[3] == 'F'.code.toByte() &&
+                riff[8] == 'W'.code.toByte() && riff[9] == 'A'.code.toByte() &&
+                riff[10] == 'V'.code.toByte() && riff[11] == 'E'.code.toByte())
+        ) return reject("缺少 RIFF/WAVE 标识")
+
+        var channels = 0
+        var rate = 0
+        var bits = 0
+        var floatPcm = false
+        var data: ByteArray? = null
+        val head = ByteArray(8)
+        var scanned = 12L
+        var chunks = 0
+        while (readFully(head)) {
+            if (++chunks > MAX_WAV_CHUNKS) return reject("WAV chunk 数超过 $MAX_WAV_CHUNKS")
+            scanned += head.size
+            val id = String(head, 0, 4, Charsets.US_ASCII)
+            val size = ((head[7].toLong() and 0xFF) shl 24) or
+                ((head[6].toLong() and 0xFF) shl 16) or
+                ((head[5].toLong() and 0xFF) shl 8) or
+                (head[4].toLong() and 0xFF)
+            val paddedSize = size + (size and 1L)
+            if (id != "data" && paddedSize > MAX_WAV_SCAN_BYTES - scanned)
+                return reject("$id 块超过 WAV 扫描上限 $MAX_WAV_SCAN_BYTES 字节")
+            when (id) {
+                "fmt " -> {
+                    if (size < 16) return reject("fmt 块长度 $size 小于 16")
+                    val fmt = ByteArray(minOf(size, 40L).toInt())
+                    if (!readFully(fmt)) return reject("fmt 块数据截断")
+                    if (size > fmt.size && !skipFully(size - fmt.size)) return reject("fmt 扩展数据截断")
+                    val audioFormat = ((fmt[1].toInt() and 0xFF) shl 8) or (fmt[0].toInt() and 0xFF)
+                    channels = ((fmt[3].toInt() and 0xFF) shl 8) or (fmt[2].toInt() and 0xFF)
+                    rate = ((fmt[7].toInt() and 0xFF) shl 24) or ((fmt[6].toInt() and 0xFF) shl 16) or
+                        ((fmt[5].toInt() and 0xFF) shl 8) or (fmt[4].toInt() and 0xFF)
+                    bits = ((fmt[15].toInt() and 0xFF) shl 8) or (fmt[14].toInt() and 0xFF)
+                    // 只按声明的 PCM 编码解读字节，避免将 A-law 等压缩数据误播成噪声。
+                    if (audioFormat != 1 && audioFormat != 3)
+                        return reject("fmt 音频格式 $audioFormat 非 PCM/IEEE float")
+                    if (channels !in 1..8 || rate !in 1..384_000)
+                        return reject("fmt 声道数/采样率非法：channels=$channels rate=$rate")
+                    if (audioFormat == 3 && bits != 32)
+                        return reject("fmt float 位深非 32：bits=$bits")
+                    if (audioFormat == 1 && bits !in listOf(8, 16, 24, 32))
+                        return reject("fmt PCM 位深不支持：bits=$bits")
+                    val blockAlign = ((fmt[13].toInt() and 0xFF) shl 8) or (fmt[12].toInt() and 0xFF)
+                    if (blockAlign != channels * (bits / 8))
+                        return reject("fmt blockAlign=$blockAlign 与 channels=$channels bits=$bits 不符")
+                    floatPcm = audioFormat == 3   // 1=PCM 整型，3=IEEE float
+                }
+                "data" -> {
+                    if (channels == 0 || rate == 0)
+                        return reject("data 块出现在有效 fmt 块之前")
+                    val cap = (rate.coerceAtLeast(1).toLong() * channels.coerceAtLeast(1) *
+                        (bits / 8).coerceAtLeast(1) * (MAX_CUSTOM_SECONDS + 1.0)).toLong()
+                    val toRead = minOf(size, cap).toInt()
+                    if (toRead > MAX_WAV_SCAN_BYTES - scanned)
+                        return reject("data 块超过 WAV 扫描上限 $MAX_WAV_SCAN_BYTES 字节")
+                    val buf = ByteArray(toRead)
+                    if (!readFully(buf)) return reject("data 块数据截断")
+                    data = buf
+                    scanned += toRead
+                }
+                else -> if (!skipFully(size)) return reject("$id 块数据截断")
+            }
+            // RIFF chunk 的有效数据长度为奇数时，末尾有一个不计入 size 的填充字节。
+            if (data == null && (size and 1L) != 0L && !skipFully(1))
+                return reject("$id 块末尾填充字节缺失")
+            if (data == null) scanned += paddedSize
+            if (data != null && channels > 0 && rate > 0) break
+        }
+        val raw = data ?: return reject("未找到 data 块")
+        if (raw.isEmpty() || channels <= 0 || rate <= 0) return reject("data 为空或 fmt 无效")
+        val bytesPerSample = bits / 8
+        if (bytesPerSample <= 0) return reject("位深非法：bits=$bits")
+        val frames = raw.size / (bytesPerSample * channels)
+        val mono = ShortArray(frames)
+        var p = 0
+        for (i in 0 until frames) {
+            if ((i and 4095) == 0) checkActive()
+            var acc = 0L
+            for (c in 0 until channels) {
+                val v: Double = when (bits) {
+                    16 -> {
+                        val lo = raw[p].toInt() and 0xFF
+                        val hi = raw[p + 1].toInt()
+                        ((hi shl 8) or lo).toShort().toInt() / 32768.0
+                    }
+                    8 -> ((raw[p].toInt() and 0xFF) - 128) / 128.0
+                    24 -> {
+                        val b0 = raw[p].toInt() and 0xFF
+                        val b1 = raw[p + 1].toInt() and 0xFF
+                        val b2 = raw[p + 2].toInt() and 0xFF
+                        val s = (b2 shl 16) or (b1 shl 8) or b0
+                        ((s shl 8) shr 8) / 8388608.0
+                    }
+                    32 -> {
+                        val ib = ((raw[p + 3].toInt() and 0xFF) shl 24) or
+                            ((raw[p + 2].toInt() and 0xFF) shl 16) or
+                            ((raw[p + 1].toInt() and 0xFF) shl 8) or (raw[p].toInt() and 0xFF)
+                        if (floatPcm) java.lang.Float.intBitsToFloat(ib).toDouble()
+                        else ib / 2147483648.0
+                    }
+                    else -> return reject("采样位深不支持：bits=$bits")
+                }
+                acc += Math.round(v.coerceIn(-1.0, 1.0) * 32768.0)
+                p += bytesPerSample
+            }
+            mono[i] = (acc / channels).toInt().coerceIn(-32768, 32767).toShort()
+        }
+        return mono to rate
+    }
+
+    /** MediaExtractor/MediaCodec 主解码路径 */
+    private suspend fun decodeViaExtractor(context: Context, uri: Uri): ShortArray? =
         withContext(Dispatchers.IO) {
             val extractor = MediaExtractor()
             try {
@@ -206,6 +408,7 @@ object SoundBank {
                     var outputEos = false
                     var loops = 0
                     while (!outputEos && frames < capSrcFrames && ++loops < 10_000) {
+                        currentCoroutineContext().ensureActive()
                         if (!inputEos) {
                             val inIdx = codec.dequeueInputBuffer(10_000)
                             if (inIdx >= 0) {
@@ -281,6 +484,8 @@ object SoundBank {
                 }
                 if (frames == 0) return@withContext null
                 resample(mono, frames, srcRate, RATE)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Log.w(TAG, "自定义音频解码失败", e)
                 null
@@ -343,7 +548,7 @@ object AudioAssets {
             java.io.BufferedInputStream(java.io.FileInputStream(f))
         ).use { input ->
             val n = input.readInt()
-            if (n < 0 || n > (SoundBank.MAX_CUSTOM_SECONDS * SoundBank.RATE).toInt() + 4800) return null
+            if (n <= 0 || n > (SoundBank.MAX_CUSTOM_SECONDS * SoundBank.RATE).toInt() + 4800) return null
             ShortArray(n) { input.readShort() }
         }
     } catch (e: Exception) {

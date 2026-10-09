@@ -279,6 +279,7 @@ object StepTracker : SensorEventListener {
     private fun publishLocked() {
         updateCoreConfigLocked()
         val c = core
+        val wasAlarm = snapshot.value.alarm
         val s = Snapshot(
             detectionEnabled = MetronomeEngine.detectionEnabled.value,
             availability = if (!MetronomeEngine.detectionEnabled.value) Availability.DISABLED
@@ -292,6 +293,14 @@ object StepTracker : SensorEventListener {
             alarmEnabled = c.config.alarmEnabled,
             sessionActive = sessionActiveForAlarm(),
         )
+        if (BuildConfig.DEBUG && wasAlarm != s.alarm) {
+            val wall = SystemClock.elapsedRealtime()
+            if (s.alarm) {
+                Log.i("MetroAlarm", "enter slowStart=${c.slowStartAtMs} coreAt=${c.alarmEnteredAtMs} wall=$wall wait=${c.config.alarmAfterMs} cadence=${c.cadenceSpm} target=${c.config.targetSpm}")
+            } else {
+                Log.i("MetroAlarm", "exit recoveryStart=${c.alarmRecoveryStartAtMs} coreAt=${c.alarmExitedAtMs} wall=$wall confirm=${c.config.recoverMs} cadence=${c.cadenceSpm} target=${c.config.targetSpm}")
+            }
+        }
         if (s != snapshot.value) snapshot.value = s
     }
 

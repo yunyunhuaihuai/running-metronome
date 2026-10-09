@@ -186,8 +186,16 @@ object MetronomeEngine {
         rightTimbre.value = c; save("rightTimbre", c)
     }
 
-    fun setLeftUseCustom(v: Boolean) { leftUseCustom.value = v; save("leftUseCustom", v) }
-    fun setRightUseCustom(v: Boolean) { rightUseCustom.value = v; save("rightUseCustom", v) }
+    fun setLeftUseCustom(v: Boolean) {
+        if (!v) AudioImporter.cancelPending(BlockRenderer.Foot.LEFT)
+        leftUseCustom.value = v
+        save("leftUseCustom", v)
+    }
+    fun setRightUseCustom(v: Boolean) {
+        if (!v) AudioImporter.cancelPending(BlockRenderer.Foot.RIGHT)
+        rightUseCustom.value = v
+        save("rightUseCustom", v)
+    }
 
     fun setLeftCustom(asset: AudioAsset?) {
         leftCustom.value = asset

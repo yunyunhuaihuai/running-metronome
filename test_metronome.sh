@@ -1,71 +1,111 @@
 #!/bin/bash
 # ============================================================
 # 节拍器自动化验证脚本（Git Bash / MSYS）
-# 前置：模拟器或手机已连接授权、已安装本 App
+# 前置：手机或模拟器已连接授权、已安装本 App 的 debug APK
 # 用法: bash test_metronome.sh [all|beats|lock|alarm|training|duck|lifecycle]
 #
 # 2026-10 v2 说明：
-#  - 所有 ADB 操作以 ADB -s <serial> 指定设备（优先 $METRO_SERIAL，
-#    否则取第一台在线设备），不再全局 adb；
-#  - 输出目录改为 running-metronome_Data/autotest-<日期>；
+#  - 所有 ADB 操作以 ADB -s <serial> 指定设备；多设备时必须提供
+#    METRO_SERIAL，避免误操作另一台设备；
+#  - 每次运行使用独立 Data 目录，不覆盖同日历史日志；
 #  - 所有失败分支以非零码退出（不再 echo 后 exit 0）；
-#  - 只清理本脚本启动的 logcat 进程（记录 PID + trap），不再 pkill 误杀；
+#  - 不清空设备全局 logcat；只清理本脚本启动的采集进程；
 #  - beats/lock 用例增加"拍数>0 / wall间隔>0"前置判定，杜绝 0 拍假通过；
 #  - 新增 alarm（注入步点验证报警触发/解除链路）、training（定时/分段）、
 #    duck（与最小播放端共存压低）、lifecycle（连续启停无残留）。
 # ============================================================
-set -u
-ADB="/d/AndroidStduio/Sdk/platform-tools/adb.exe"
+set -euo pipefail
+ADB="${METRO_ADB:-/d/AndroidStduio/Sdk/platform-tools/adb.exe}"
 PKG="com.metronome.app"
 RCV="$PKG/.DebugReceiver"
-TODAY=$(date +%Y%m%d)
-OUT="/d/APK/running-metronome_Data/autotest-$TODAY"
-mkdir -p "$OUT"
+DATA_ROOT="${METRO_DATA_ROOT:-/d/APK/running-metronome_Data}"
 export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
 
 # ------------------------------------------------------------ 设备与进程管理
+[ -d "$DATA_ROOT" ] || { echo "[错误] 数据目录不存在: $DATA_ROOT"; exit 1; }
+command -v "$ADB" >/dev/null 2>&1 || { echo "[错误] ADB 不存在: $ADB"; exit 1; }
 if [ -n "${METRO_SERIAL:-}" ]; then
   SERIAL="$METRO_SERIAL"
 else
-  SERIAL=$("$ADB" devices | awk 'NR>1 && $2=="device"{print $1; exit}')
+  mapfile -t ONLINE < <("$ADB" devices | awk 'NR>1 {sub(/\r$/, "", $2); if ($2=="device") print $1}')
+  [ "${#ONLINE[@]}" -eq 1 ] || {
+    echo "[错误] 在线设备数=${#ONLINE[@]}；请先确认目标并设置 METRO_SERIAL=<serial>"
+    "$ADB" devices -l
+    exit 1
+  }
+  SERIAL="${ONLINE[0]}"
 fi
-[ -n "${SERIAL:-}" ] || { echo "[错误] 无在线设备，先连接/启动模拟器"; exit 1; }
+[ -n "${SERIAL:-}" ] || { echo "[错误] 未指定目标设备"; exit 1; }
 echo "目标设备: $SERIAL"
 A() { "$ADB" -s "$SERIAL" "$@"; }
 
-LOG_PIDS=()
+SERIAL_SAFE=$(printf '%s' "$SERIAL" | tr -c 'A-Za-z0-9._-' '_')
+RUN_ID="$(date +%Y%m%d-%H%M%S)-${SERIAL_SAFE}-$$"
+OUT="$DATA_ROOT/autotest-$RUN_ID"
+mkdir "$OUT" || { echo "[错误] 无法创建独立日志目录: $OUT"; exit 1; }
+echo "日志目录: $OUT"
+
+LOG_PID=""
+LOG_FILE=""
+LOG_MARKER=""
+SESSION_STARTED=0
+INJECTION_ACTIVE=0
+PROBE_STARTED=0
+SCREEN_WAS_AWAKE=0
+SCREEN_LOCKED_BY_US=0
 cleanup() {
-  for pid in "${LOG_PIDS[@]:-}"; do
-    kill "$pid" 2>/dev/null
-  done
+  if [ -n "$LOG_PID" ]; then kill "$LOG_PID" 2>/dev/null || true; wait "$LOG_PID" 2>/dev/null || true; fi
+  if [ "$INJECTION_ACTIVE" -eq 1 ]; then A shell am broadcast -a "$PKG.debug.INJECT_STOP" -n "$RCV" >/dev/null 2>&1 || true; fi
+  if [ "$PROBE_STARTED" -eq 1 ]; then A shell am broadcast -a "$PKG.debug.PROBE_STOP" -n "$RCV" >/dev/null 2>&1 || true; fi
+  if [ "$SESSION_STARTED" -eq 1 ]; then A shell am broadcast -a "$PKG.debug.STOP" -n "$RCV" >/dev/null 2>&1 || true; fi
+  if [ "$SCREEN_LOCKED_BY_US" -eq 1 ] && [ "$SCREEN_WAS_AWAKE" -eq 1 ]; then A shell input keyevent 224 >/dev/null 2>&1 || true; fi
 }
 trap cleanup EXIT
 
-# 启动本脚本专属 logcat 采集（记录 PID，退出时清理）
+# 独立采集：不使用 logcat -c；标记之后的记录才属于本用例。
 capture() {  # capture <文件名> <tags...>
-  local file="$1"; shift
-  ( A logcat -s "$@" > "$file" 2>&1 ) &
-  LOG_PIDS+=($!)
-  A logcat -c
+  local i
+  [ -z "$LOG_PID" ] || fail "上一段 logcat 仍在运行"
+  LOG_FILE="$1"; shift
+  LOG_MARKER="BEGIN_${RUN_ID}_$(basename "$LOG_FILE" .log)"
+  "$ADB" -s "$SERIAL" logcat -T 1 -s MetroTest:I "$@" > "$LOG_FILE" 2>&1 &
+  LOG_PID=$!
+  A shell log -t MetroTest "$LOG_MARKER" >/dev/null
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    if grep -Fq "$LOG_MARKER" "$LOG_FILE"; then return; fi
+    sleep 0.2
+  done
+  fail "未收到 logcat 起始标记: $LOG_FILE"
+}
+
+stop_capture() {
+  local tmp="$LOG_FILE.current"
+  [ -n "$LOG_PID" ] || fail "没有运行中的 logcat 采集"
+  kill "$LOG_PID" 2>/dev/null || true
+  wait "$LOG_PID" 2>/dev/null || true
+  LOG_PID=""
+  awk -v marker="$LOG_MARKER" 'index($0, marker) { seen=1; next } seen' "$LOG_FILE" > "$tmp"
+  [ -s "$tmp" ] || fail "采集为空或起始标记之后无日志: $LOG_FILE"
+  mv "$tmp" "$LOG_FILE"
+  LOG_FILE=""
+  LOG_MARKER=""
 }
 
 fail() { echo "[错误] $1"; exit 1; }
 A get-state >/dev/null 2>&1 || fail "设备 $SERIAL 未就绪"
 
-start_at_120() {  # 亮屏解锁 → 前台启动 App → 配置 120 SPM（默认静音不振动）
-  A shell input keyevent 224
-  A shell wm dismiss-keyguard
-  sleep 1
-  A shell am start -n "$PKG/.MainActivity" >/dev/null 2>&1
-  sleep 2
+# 非屏幕用例只用 debug 广播配置；不会唤醒/解锁/切换用户界面。
+start_at_120() {
   A shell am broadcast -a "$PKG.debug.SET" -n "$RCV" --ei spm 120 \
-      --ez sound "${1:-false}" --ez vibrate "${2:-false}" >/dev/null
+      --ez sound "${1:-false}" --ez vibrate "${2:-false}" \
+      --ez detect false --ez alarm false --ez timer false --ei prepareSec 0 \
+      --ez segments false >/dev/null
 }
 
-start_session() { A shell am broadcast -a "$PKG.debug.START" -n "$RCV" >/dev/null; }
+start_session() { A shell am broadcast -a "$PKG.debug.START" -n "$RCV" >/dev/null; SESSION_STARTED=1; }
 pause_session() { A shell am broadcast -a "$PKG.debug.PAUSE" -n "$RCV" >/dev/null; }
 resume_session() { A shell am broadcast -a "$PKG.debug.RESUME" -n "$RCV" >/dev/null; }
-stop_session() { A shell am broadcast -a "$PKG.debug.STOP" -n "$RCV" >/dev/null; }
+stop_session() { A shell am broadcast -a "$PKG.debug.STOP" -n "$RCV" >/dev/null; SESSION_STARTED=0; }
 
 # ---------------------------------------------------------- 测试 1: 120 拍/分钟
 test_beats() {
@@ -77,20 +117,25 @@ test_beats() {
   sleep 66
   stop_session
   sleep 2
-  cleanup
-  awk 'BEGIN{cnt=0;last=-1;maxd=0}
+  stop_capture
+  awk 'BEGIN{cnt=0;last=-1;first=-1;wFirst=-1;wLast=-1;maxd=0;maxW=0}
   /MetroBeat: beat=/ {
     split($0, a, "audioMs="); split(a[2], b, " "); ms = b[1]+0;
-    if (ms >= 0 && ms < 60000) {
+    split($0, e, "wall="); wall = e[2]+0;
+    if (first < 0) first = ms;
+    if (ms >= first && ms - first < 60000) {
       cnt++;
       if (last >= 0) { d = ms - last; if (d > maxd) maxd = d }
+      if (wFirst < 0) wFirst = wall;
+      if (wLast >= 0) { dw = wall - wLast; if (dw > maxW) maxW = dw }
       last = ms;
+      wLast = wall;
     }
   } END {
-    printf "60 秒窗口节拍数: %d（期望 120）, audio时钟最大间隔: %.0f ms（期望 500）\n", cnt, maxd;
+    printf "60 秒窗口节拍数: %d（期望 120）, audio最大间隔: %.0f ms, wall最大间隔: %.0f ms, wall跨度: %.0f ms\n", cnt, maxd, maxW, wLast-wFirst;
     if (cnt < 60)     { print "结果: ❌ 未通过（拍数异常少，调度或回调中断）"; exit 1 }
-    if (cnt == 120 && maxd <= 510) print "结果: ✅ 通过"
-    else if (cnt == 120) { print "结果: ⚠ 节拍数正确但最大间隔偏大"; exit 1 }
+    if (cnt == 120 && maxd <= 510 && maxW > 0 && maxW < 1200 && wLast-wFirst >= 58000 && wLast-wFirst <= 62000) print "结果: ✅ 通过"
+    else if (cnt == 120) { print "结果: ❌ 拍数正确，但音频/壁钟间隔或壁钟跨度异常"; exit 1 }
     else { print "结果: ❌ 未通过"; exit 1 }
   }' "$OUT/beats.log" || exit 1
 }
@@ -98,22 +143,34 @@ test_beats() {
 # ---------------------------------------------------------- 测试 2: 锁屏不中断
 test_lock() {
   echo "=== 测试 2: 锁屏 30 秒节拍是否中断（静音）==="
+  local power_state i
+  power_state=$(A shell dumpsys power | tr -d '\r' | grep -m1 'mWakefulness=' || true)
+  case "$power_state" in
+    *Awake*) SCREEN_WAS_AWAKE=1 ;;
+    *Asleep*|*Dozing*) SCREEN_WAS_AWAKE=0 ;;
+    *) fail "无法读取屏幕初始状态，取消锁屏用例以免意外切换屏幕" ;;
+  esac
   start_at_120 false false
   capture "$OUT/lock.log" "MetroBeat:I" "MetroTest:I"
   start_session
   sleep 2
-  A shell "log -t MetroTest LOCK_START"
-  A shell input keyevent 26
+  A shell input keyevent 223  # KEYCODE_SLEEP，避免 toggle 把已息屏手机唤醒
+  SCREEN_LOCKED_BY_US=1
+  for i in 1 2 3 4 5; do
+    sleep 1
+    power_state=$(A shell dumpsys power | tr -d '\r' | grep -m1 'mWakefulness=' || true)
+    case "$power_state" in *Awake*|"") ;; *) break ;; esac
+  done
+  case "$power_state" in *Awake*|"") fail "手机未进入息屏状态" ;; esac
+  A shell log -t MetroTest LOCK_START
   sleep 30
-  A shell input keyevent 224
-  sleep 1
-  A shell wm dismiss-keyguard
-  sleep 1
-  A shell "log -t MetroTest LOCK_END"
+  A shell log -t MetroTest LOCK_END
+  if [ "$SCREEN_WAS_AWAKE" -eq 1 ]; then A shell input keyevent 224; fi
+  SCREEN_LOCKED_BY_US=0
   sleep 2
   stop_session
   sleep 2
-  cleanup
+  stop_capture
   awk 'BEGIN{inLock=0;aLast=-1;wLast=-1;maxA=0;maxW=0;cnt=0;windows=0}
   /MetroTest: LOCK_START/{inLock=1;windows++}
   /MetroTest: LOCK_END/{inLock=0}
@@ -126,53 +183,54 @@ test_lock() {
     aLast=ms; wLast=w;
   } END {
     printf "锁屏窗口数: %d, 窗口内 %d 拍（约60）, audio最大间隔 %.0f ms, wall最大间隔 %.0f ms\n", windows, cnt, maxA, maxW;
-    if (cnt == 0)          { print "结果: ❌ 未通过（锁屏期间 0 拍，不能证明不中断）"; exit 1 }
-    if (windows==1 && maxW < 1200) print "结果: ✅ 锁屏未中断"
-    else { print "结果: ❌ 有中断（ColorOS 睡眠策略见指南电池设置一节；模拟器壁钟精度另计）"; exit 1 }
+    if (cnt < 40)          { print "结果: ❌ 未通过（锁屏期间拍数不足，不能证明不中断）"; exit 1 }
+    if (windows==1 && maxW > 0 && maxW < 1200) print "结果: ✅ 锁屏未中断"
+    else { print "结果: ❌ 有中断（ColorOS 睡眠策略见指南电池设置一节）"; exit 1 }
   }' "$OUT/lock.log" || exit 1
 }
 
 # ---------------------------------------------------------- 测试 3: 报警链路（注入步点）
 test_alarm() {
-  echo "=== 测试 3: 注入步点验证偏慢报警触发/解除（模拟器无 Step Detector 时的链路验证）==="
-  # 场景：3s 热身 + 3s @180 → 切 100 SPM → 预计 ~5s+ 后报警（长音/短提示按当前配置）
-  #       再切回 180 → 恢复确认 600ms 内解除
-  start_at_120 false true
-  A shell am broadcast -a "$PKG.debug.SET" -n "$RCV" --ez alarm true --ei alarmAfter 5 \
-      --ei slowMargin 8 --ei recoverMs 600 --ez timer false >/dev/null
-  capture "$OUT/alarm.log" "MetroState:I" "MetroBeat:I" "MetroFocus:I"
+  echo "=== 测试 3: 注入步点验证偏慢报警及提示 PCM 提交（不代表真实跑步传感器或耳机听感）==="
+  # 场景：6s @180 → 切 100 SPM → 配置等待 5s 后报警并提交提示 PCM
+  #       再切回 180 → 恢复确认后取消提示；日志时间是音频写入时间，不是出声时间。
+  start_at_120 true false
+  A shell am broadcast -a "$PKG.debug.SET" -n "$RCV" --ez detect true --ez alarm true --ei alarmAfter 5 \
+      --ei slowMargin 8 --ei recoverMs 600 --ei repeatSec 2 --ei alarmStyle 0 --ei volume 30 --ez timer false >/dev/null
+  capture "$OUT/alarm.log" "MetroState:I" "MetroBeat:I" "MetroFocus:I" "MetroAlarm:I" "MetroPrompt:I"
   start_session
+  A shell log -t MetroTest FAST_BEGIN
   A shell am broadcast -a "$PKG.debug.INJECT" -n "$RCV" --ei spm 180 --ei durationMs 6000 >/dev/null
+  INJECTION_ACTIVE=1
   echo "-- 快跑 6 秒（180 SPM 注入）"
   sleep 6.5
   A shell am broadcast -a "$PKG.debug.STATUS" -n "$RCV" >/dev/null
   echo "-- 切慢跑 100 SPM 12 秒（应触发报警）"
+  A shell log -t MetroTest SLOW_BEGIN
   A shell am broadcast -a "$PKG.debug.INJECT" -n "$RCV" --ei spm 100 --ei durationMs 12000 >/dev/null
   sleep 12.5
   A shell am broadcast -a "$PKG.debug.STATUS" -n "$RCV" >/dev/null
-  ALARM_AT=$(grep -c "detector:.*alarm=true" "$OUT/alarm.log")
   echo "-- 切回 180 SPM 4 秒（应解除报警）"
+  A shell log -t MetroTest RECOVERY_BEGIN
   A shell am broadcast -a "$PKG.debug.INJECT" -n "$RCV" --ei spm 180 --ei durationMs 4000 >/dev/null
   sleep 4.5
   A shell am broadcast -a "$PKG.debug.STATUS" -n "$RCV" >/dev/null
   stop_session
   sleep 1
   A shell am broadcast -a "$PKG.debug.INJECT_STOP" -n "$RCV" >/dev/null
-  cleanup
+  INJECTION_ACTIVE=0
+  stop_capture
+  ALARM_AT=$(grep -c "detector:.*alarm=true" "$OUT/alarm.log" || true)
   echo "STATUS 快照中的 detector 行:"
-  grep "detector:" "$OUT/alarm.log"
-  if [ "$ALARM_AT" -ge 1 ]; then
-    echo "结果: ✅ 慢速触发报警（快照见上，恢复解除以最后一次 STATUS alarm=false 为准）"
-  else
-    echo "结果: ❌ 未观察到报警触发"
-    exit 1
-  fi
-  if grep "detector:" "$OUT/alarm.log" | tail -1 | grep -q "alarm=false"; then
-    echo "      恢复解除: ✅"
-  else
-    echo "      恢复解除: ❌ 最后快照仍报警"
-    exit 1
-  fi
+  grep "detector:" "$OUT/alarm.log" || true
+  [ "$ALARM_AT" -ge 1 ] || fail "未观察到报警触发"
+  grep "detector:" "$OUT/alarm.log" | tail -1 | grep -q "alarm=false" || fail "最后快照仍报警"
+  grep -q 'MetroAlarm: enter ' "$OUT/alarm.log" || fail "没有报警进入时间证据"
+  grep -q 'MetroAlarm: exit ' "$OUT/alarm.log" || fail "没有报警解除时间证据"
+  grep -q 'MetroPrompt: pcm-submitted ' "$OUT/alarm.log" || fail "报警未提交短提示 PCM"
+  grep -q 'MetroPrompt: fade-submitted ' "$OUT/alarm.log" || fail "解除时未提交提示淡出 PCM"
+  echo "结果: ✅ 报警触发、提示 PCM 提交、解除与淡出均有证据"
+  awk '/MetroAlarm: (enter|exit) |MetroPrompt: (pcm-submitted|fade-submitted) / { if (++shown <= 12) print }' "$OUT/alarm.log"
 }
 
 # ---------------------------------------------------------- 测试 4: 训练（定时+分段）
@@ -189,14 +247,16 @@ test_training() {
   sleep 26
   stop_session
   sleep 1
-  cleanup
+  stop_capture
   echo "状态转移记录:"
-  grep "state=session" "$OUT/training.log"
-  SEG=$(grep -c "segment-enter" "$OUT/training.log")
-  FIN=$(grep -c "state=session-finished" "$OUT/training.log")
-  echo "段切换次数: $SEG（期望 ≥3：段1→段2→段1(第2轮)→段2）"
+  grep "state=session" "$OUT/training.log" || true
+  SEG=$(grep -c "segment-enter" "$OUT/training.log" || true)
+  FIN=$(grep -c "state=session-finished" "$OUT/training.log" || true)
+  SEG_SEQ=$(awk '/state=segment-enter/ { seg=""; round=""; for(i=1;i<=NF;i++){ if($i ~ /^seg=/){split($i,a,"=");seg=a[2]} if($i ~ /^round=/){split($i,a,"=");round=a[2]} } printf "%s%s:%s", (n++ ? " " : ""),seg,round } END{print ""}' "$OUT/training.log")
+  echo "段切换次数: $SEG（期望 4：0:1 1:1 0:2 1:2），实际顺序: $SEG_SEQ"
   echo "结束提示记录: $FIN（期望 1，不自动转正计时）"
-  if [ "$FIN" -eq 1 ] && [ "$SEG" -ge 3 ]; then
+  if [ "$FIN" -eq 1 ] && [ "$SEG" -eq 4 ] && [ "$SEG_SEQ" = '0:1 1:1 0:2 1:2' ] && \
+      grep -q 'state=session-finished byCap=true.*clock=false.*session=FINISHED' "$OUT/training.log"; then
     echo "结果: ✅ 通过"
   else
     echo "结果: ❌ 未通过"
@@ -206,40 +266,59 @@ test_training() {
 
 # ---------------------------------------------------------- 测试 5: 与音乐共存压低
 test_duck() {
-  echo "=== 测试 5: 先音乐后节拍（音乐被压低不暂停）；先节拍后音乐（节拍中断→恢复）==="
-  echo "-- A: 先启动 DuckProbe（模拟音乐，申请 GAIN），再启动节拍（MAY_DUCK）"
-  A shell am start -n "$PKG/.DuckProbeActivity" >/dev/null 2>&1
-  sleep 2
+  echo "=== 测试 5: 先受控播放器后节拍（duck）；先节拍后播放器（永久夺焦点后静音）==="
   start_at_120 true false
   capture "$OUT/duck.log" "MetroFocus:I" "MetroDuck:I" "MetroState:I"
+  A shell am broadcast -a "$PKG.debug.PROBE_STOP" -n "$RCV" >/dev/null
+  echo "-- A: 先启动 DuckProbe（模拟音乐，申请 GAIN），再启动节拍（MAY_DUCK）"
+  A shell am start -n "$PKG/.DuckProbeActivity" >/dev/null 2>&1
+  PROBE_STARTED=1
+  sleep 2
   start_session
   sleep 8
   A shell am broadcast -a "$PKG.debug.STATUS" -n "$RCV" >/dev/null
-  echo "-- B: 返回键退出 probe（节拍应 GAIN 恢复），再启动 probe（节拍应收到 LOSS 静音）"
-  A shell input keyevent 4
-  sleep 3
+  A shell log -t MetroTest DUCK_PHASE_A_END >/dev/null
+  echo "-- B: 明确结束 probe 后重新启动（节拍应收到 LOSS 并静音，需手动恢复声音）"
+  A shell am broadcast -a "$PKG.debug.PROBE_STOP" -n "$RCV" >/dev/null
+  sleep 2
   A shell am broadcast -a "$PKG.debug.STATUS" -n "$RCV" >/dev/null
+  A shell log -t MetroTest DUCK_PHASE_B_START >/dev/null
   A shell am start -n "$PKG/.DuckProbeActivity" >/dev/null 2>&1
   sleep 6
   A shell am broadcast -a "$PKG.debug.STATUS" -n "$RCV" >/dev/null
+  A shell log -t MetroTest DUCK_PHASE_B_END >/dev/null
   stop_session
-  A shell input keyevent 4
+  A shell am broadcast -a "$PKG.debug.PROBE_STOP" -n "$RCV" >/dev/null
+  PROBE_STARTED=0
   sleep 1
-  cleanup
+  stop_capture
   echo "焦点链路记录（MetroFocus / MetroDuck）:"
-  grep -E "MetroFocus|MetroDuck" "$OUT/duck.log" | head -40
-  DUCK_EVENTS=$(grep -c "LOSS_TRANSIENT_CAN_DUCK\|LOSS (permanent)" "$OUT/duck.log")
-  GAIN_EVENTS=$(grep -c "focus GAIN" "$OUT/duck.log")
-  if [ "$DUCK_EVENTS" -ge 1 ]; then
-    echo "结果: ✅ 观察到焦点竞争事件 x$DUCK_EVENTS（压低/中断行为见日志；听感受限于模拟器）"
+  grep -a -E "MetroFocus|MetroDuck" "$OUT/duck.log" | head -40 || true
+  awk '/MetroTest: DUCK_PHASE_A_END/{exit} {print}' "$OUT/duck.log" > "$OUT/duck-phase-a.log"
+  awk '/MetroTest: DUCK_PHASE_B_START/{on=1;next} /MetroTest: DUCK_PHASE_B_END/{exit} on{print}' \
+      "$OUT/duck.log" > "$OUT/duck-phase-b.log"
+  if grep -aFq 'probe started' "$OUT/duck-phase-a.log" && \
+     grep -aFq 'request GAIN -> 1' "$OUT/duck-phase-a.log" && \
+     grep -aFq 'focus change: LOSS_TRANSIENT_CAN_DUCK' "$OUT/duck-phase-a.log" && \
+     grep -aFq 'request MAY_DUCK -> granted=1' "$OUT/duck-phase-a.log" && \
+     grep -aEq 'state=debug-status.*session=RUNNING' "$OUT/duck-phase-a.log"; then
+    echo "阶段 A: ✅ 受控播放器收到 duck，节拍保持运行"
   else
-    echo "结果: ⚠ 未捕获焦点事件（模拟器音频栈可能不转发 duck，真机待测）"
+    echo "阶段 A: ❌ 未证明先音乐后节拍的 duck 链路"
+    exit 1
   fi
-  if [ "$GAIN_EVENTS" -ge 1 ]; then
-    echo "      节拍恢复: ✅ GAIN 事件已记录"
+  # 设计语义：被 GAIN 永久夺焦点后 App 主动放弃申请并静音（通知提供"恢复声音"
+  # 手动入口），系统不会在对方放弃后自动回调 GAIN——恢复以手动重申请为准。
+  if grep -aFq 'probe started' "$OUT/duck-phase-b.log" && \
+     grep -aFq 'request GAIN -> 1' "$OUT/duck-phase-b.log" && \
+     grep -aFq 'focus LOSS -> muted' "$OUT/duck-phase-b.log" && \
+     grep -aEq 'state=debug-status.*session=RUNNING' "$OUT/duck-phase-b.log"; then
+    echo "阶段 B: ✅ 永久夺焦点后节拍静音，训练计时保持运行（需手动恢复声音）"
   else
-    echo "      节拍恢复: ⚠ 未捕获 GAIN"
+    echo "阶段 B: ❌ 未证明先节拍后播放器的静音链路"
+    exit 1
   fi
+  echo "说明：DuckProbe 是受控测试播放端，未据此判断真实音乐 App 的听感或精确压低比例。"
 }
 
 # ---------------------------------------------------------- 测试 6: 服务生命周期
@@ -254,7 +333,7 @@ test_lifecycle() {
     echo "-- 第 $i 次启停完成"
   done
   FAIL=0
-  PID=$(A shell pidof "$PKG" | tr -d '\r')
+  PID=$(A shell pidof "$PKG" | tr -d '\r' || true)
   if [ -z "$PID" ]; then
     echo "应用进程已退出，线程必然无残留"
   else

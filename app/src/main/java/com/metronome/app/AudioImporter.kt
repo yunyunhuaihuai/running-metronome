@@ -7,12 +7,29 @@ import com.metronome.app.core.BlockRenderer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
+
+/** 两只脚的导入请求独立编号；切回内置时使该脚所有在途结果失效。 */
+internal class ImportGeneration {
+    private val left = AtomicLong(0)
+    private val right = AtomicLong(0)
+
+    private fun counter(foot: BlockRenderer.Foot): AtomicLong = when (foot) {
+        BlockRenderer.Foot.LEFT -> left
+        BlockRenderer.Foot.RIGHT -> right
+    }
+
+    fun next(foot: BlockRenderer.Foot): Long = counter(foot).incrementAndGet()
+    fun invalidate(foot: BlockRenderer.Foot) { counter(foot).incrementAndGet() }
+    fun isCurrent(foot: BlockRenderer.Foot, generation: Long): Boolean =
+        counter(foot).get() == generation
+}
 
 /**
  * 自定义音频导入管线（每只脚独立）：
@@ -26,8 +43,9 @@ import kotlin.math.sqrt
 object AudioImporter {
     private const val TAG = "AudioImporter"
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    private val seq = AtomicLong(0)
-    private val jobs = HashMap<String, Job>()
+    private val generations = ImportGeneration()
+    private val guard = Any()
+    private val jobs = HashMap<BlockRenderer.Foot, Job>()
 
     /**
      * 导入音频到指定脚（LEFT/RIGHT）。pickUri 为 SAF 选择结果。
@@ -35,70 +53,110 @@ object AudioImporter {
      */
     fun import(context: Context, foot: BlockRenderer.Foot, uri: Uri, displayName: String?) {
         val app = context.applicationContext
-        val key = foot.name
-        val mySeq = seq.incrementAndGet()
-        jobs[key]?.cancel()
-        setLoad(foot, MetronomeEngine.CustomLoadState(MetronomeEngine.LoadStatus.LOADING))
-        jobs[key] = scope.launch {
-            val result = withContext(Dispatchers.IO) {
-                try {
-                    SoundBank.decodeCustom(app, uri)
-                } catch (e: Exception) {
-                    Log.w(TAG, "decode cancelled/failed", e)
-                    null
-                }
+        synchronized(guard) {
+            jobs[foot]?.cancel()
+            val mySeq = generations.next(foot)
+            setLoad(foot, MetronomeEngine.CustomLoadState(MetronomeEngine.LoadStatus.LOADING))
+            jobs[foot] = scope.launch {
+                importSelected(app, foot, uri, displayName, mySeq)
             }
-            if (seq.get() != mySeq) return@launch   // 已有更新的导入请求，丢弃
-            if (result == null || result.isEmpty()) {
-                setLoad(
+        }
+    }
+
+    /** 用户切回内置音色时废弃该脚尚未完成的导入。 */
+    fun cancelPending(foot: BlockRenderer.Foot) {
+        synchronized(guard) {
+            generations.invalidate(foot)
+            jobs.remove(foot)?.cancel()
+            val load = if (foot == BlockRenderer.Foot.LEFT)
+                MetronomeEngine.leftLoad.value else MetronomeEngine.rightLoad.value
+            if (load.status == MetronomeEngine.LoadStatus.LOADING) {
+                setLoad(foot, MetronomeEngine.CustomLoadState())
+            }
+        }
+    }
+
+    private suspend fun importSelected(
+        app: Context,
+        foot: BlockRenderer.Foot,
+        uri: Uri,
+        displayName: String?,
+        mySeq: Long,
+    ) {
+        val result = withContext(Dispatchers.IO) {
+            try {
+                SoundBank.decodeCustom(app, uri)
+            } catch (e: Exception) {
+                Log.w(TAG, "decode cancelled/failed", e)
+                null
+            }
+        }
+        if (!generations.isCurrent(foot, mySeq)) return
+        if (result == null || result.isEmpty()) {
+            synchronized(guard) {
+                if (generations.isCurrent(foot, mySeq)) setLoad(
                     foot, MetronomeEngine.CustomLoadState(
                         MetronomeEngine.LoadStatus.FAILED, "无法解码该音频文件（格式不支持或数据为空）"
                     )
                 )
-                return@launch
             }
-            if (peakLevel(result) < 10) {
-                setLoad(
+            return
+        }
+        if (peakLevel(result) < 10) {
+            synchronized(guard) {
+                if (generations.isCurrent(foot, mySeq)) setLoad(
                     foot, MetronomeEngine.CustomLoadState(
                         MetronomeEngine.LoadStatus.FAILED, "该音频几乎是静音，未采用"
                     )
                 )
-                return@launch
             }
-            val id = "aud_" + System.currentTimeMillis().toString(36) + "_" + mySeq.toString(36)
-            val name = displayName ?: uri.lastPathSegment ?: "自定义音频"
+            return
+        }
+        val id = "aud_" + foot.name.lowercase() + "_" +
+            System.currentTimeMillis().toString(36) + "_" + mySeq.toString(36)
+        val name = displayName ?: uri.lastPathSegment ?: "自定义音频"
+        var applied = false
+        try {
             val saved = withContext(Dispatchers.IO) { AudioAssets.savePcm(app, id, result) }
             if (!saved) {
-                setLoad(
-                    foot, MetronomeEngine.CustomLoadState(
-                        MetronomeEngine.LoadStatus.FAILED, "保存音频失败"
+                synchronized(guard) {
+                    if (generations.isCurrent(foot, mySeq)) setLoad(
+                        foot, MetronomeEngine.CustomLoadState(
+                            MetronomeEngine.LoadStatus.FAILED, "保存音频失败"
+                        )
                     )
-                )
-                return@launch
-            }
-            if (seq.get() != mySeq) {
-                AudioAssets.delete(app, id)   // 迟到结果：不生效，清理资源
-                return@launch
-            }
-            val asset = com.metronome.app.core.AudioAsset(id, name)
-            when (foot) {
-                BlockRenderer.Foot.LEFT -> {
-                    SoundBank.leftPcm = result
-                    MetronomeEngine.setLeftCustom(asset)
-                    MetronomeEngine.setLeftUseCustom(true)
                 }
-                BlockRenderer.Foot.RIGHT -> {
-                    SoundBank.rightPcm = result
-                    MetronomeEngine.setRightCustom(asset)
-                    MetronomeEngine.setRightUseCustom(true)
+                return
+            }
+            synchronized(guard) {
+                if (generations.isCurrent(foot, mySeq)) {
+                    val asset = com.metronome.app.core.AudioAsset(id, name)
+                    when (foot) {
+                        BlockRenderer.Foot.LEFT -> {
+                            SoundBank.leftPcm = result
+                            MetronomeEngine.setLeftCustom(asset)
+                            MetronomeEngine.setLeftUseCustom(true)
+                        }
+                        BlockRenderer.Foot.RIGHT -> {
+                            SoundBank.rightPcm = result
+                            MetronomeEngine.setRightCustom(asset)
+                            MetronomeEngine.setRightUseCustom(true)
+                        }
+                    }
+                    setLoad(
+                        foot, MetronomeEngine.CustomLoadState(
+                            MetronomeEngine.LoadStatus.READY,
+                            "已加载：$name（取前 ${SoundBank.MAX_CUSTOM_SECONDS.toInt()} 秒）"
+                        )
+                    )
+                    applied = true
                 }
             }
-            setLoad(
-                foot, MetronomeEngine.CustomLoadState(
-                    MetronomeEngine.LoadStatus.READY,
-                    "已加载：$name（取前 ${SoundBank.MAX_CUSTOM_SECONDS.toInt()} 秒）"
-                )
-            )
+        } finally {
+            // savePcm 可能在取消后仍完成；凡未发布为有效资源的文件都清理。
+            if (!applied) withContext(NonCancellable + Dispatchers.IO) {
+                AudioAssets.delete(app, id)
+            }
         }
     }
 
@@ -127,13 +185,48 @@ object AudioImporter {
     /** 启动时从私有目录恢复双脚自定义 PCM（存在且启用才恢复） */
     fun restoreFromAssets(context: Context) {
         val app = context.applicationContext
+        val leftGeneration: Long
+        val rightGeneration: Long
+        synchronized(guard) {
+            leftGeneration = generations.next(BlockRenderer.Foot.LEFT)
+            rightGeneration = generations.next(BlockRenderer.Foot.RIGHT)
+        }
         scope.launch(Dispatchers.IO) {
-            MetronomeEngine.leftCustom.value?.let { a ->
-                AudioAssets.loadPcm(app, a.id)?.let { SoundBank.leftPcm = it }
+            suspend fun restore(foot: BlockRenderer.Foot, generation: Long) {
+                val asset = when (foot) {
+                    BlockRenderer.Foot.LEFT -> MetronomeEngine.leftCustom.value
+                    BlockRenderer.Foot.RIGHT -> MetronomeEngine.rightCustom.value
+                } ?: return
+                val pcm = AudioAssets.loadPcm(app, asset.id)
+                synchronized(guard) {
+                    val current = when (foot) {
+                        BlockRenderer.Foot.LEFT -> MetronomeEngine.leftCustom.value
+                        BlockRenderer.Foot.RIGHT -> MetronomeEngine.rightCustom.value
+                    }
+                    if (!generations.isCurrent(foot, generation) || current?.id != asset.id) return@synchronized
+                    if (pcm != null) {
+                        if (foot == BlockRenderer.Foot.LEFT) SoundBank.leftPcm = pcm
+                        else SoundBank.rightPcm = pcm
+                    } else {
+                        Log.w(TAG, "saved custom audio missing: foot=$foot id=${asset.id}")
+                        if (foot == BlockRenderer.Foot.LEFT) {
+                            SoundBank.leftPcm = null
+                            MetronomeEngine.setLeftUseCustom(false)
+                            MetronomeEngine.setLeftCustom(null)
+                        } else {
+                            SoundBank.rightPcm = null
+                            MetronomeEngine.setRightUseCustom(false)
+                            MetronomeEngine.setRightCustom(null)
+                        }
+                        setLoad(foot, MetronomeEngine.CustomLoadState(
+                            MetronomeEngine.LoadStatus.FAILED,
+                            "自定义音频已丢失，请重新导入",
+                        ))
+                    }
+                }
             }
-            MetronomeEngine.rightCustom.value?.let { a ->
-                AudioAssets.loadPcm(app, a.id)?.let { SoundBank.rightPcm = it }
-            }
+            restore(BlockRenderer.Foot.LEFT, leftGeneration)
+            restore(BlockRenderer.Foot.RIGHT, rightGeneration)
         }
     }
 

@@ -142,7 +142,8 @@ class DetectorCoreTest {
         feed(100, 12_000)   // 慢跑触发报警
         assertTrue(core.slowAlarm)
         // 切回快跑：恢复方向开始（fastSince 设置）
-        feed(180, 1_200)
+        feed(180, 750) // 2 个快速间隔已令 4 间隔均值过阈，但下一个步点尚未到来
+        assertTrue(core.slowAlarm)
         val dl = core.nextDeadlineMs()
         assertNotNull("恢复确认应有 deadline", dl)
         // 不再喂步点，直接推进到 deadline 之后 evaluate —— 必须解除
@@ -150,6 +151,11 @@ class DetectorCoreTest {
         core.evaluate(now)
         assertFalse("恢复确认到点即解除，不等下一轮提示周期", core.slowAlarm)
         assertEquals(0L, core.slowProgressMs)
+        assertTrue("应记录恢复确认起点", core.alarmRecoveryStartAtMs > 0)
+        assertTrue(
+            "恢复确认时长应达到配置值",
+            core.alarmExitedAtMs - core.alarmRecoveryStartAtMs >= core.config.recoverMs
+        )
     }
 
     @Test
@@ -160,6 +166,55 @@ class DetectorCoreTest {
         assertTrue("短暂加速不应解除报警", core.slowAlarm)
         feed(100, 2_000)
         assertTrue(core.slowAlarm)
+    }
+
+    @Test
+    fun `recovery stays confirmed through alternating event timestamp jitter`() {
+        core.config = core.config.copy(targetSpm = 190)
+        now = 1_000
+        core.onStep(now, now)
+        repeat(16) {
+            now += 375 // 160 SPM，先真实触发 5s 报警
+            core.onStep(now, now)
+        }
+        assertTrue("修复前先已报警", core.slowAlarm)
+        val recoveryStart = now
+        // 真实节奏约 190 SPM，但相邻 event timestamp 的正负抖动令
+        // 最近 3 间隔中位数频繁跨过 187 SPM 恢复阈值。
+        val intervals = intArrayOf(
+            313, 323, 298, 339, 296, 327, 306, 330, 295, 331, 312, 324,
+            298, 339, 296, 326, 307, 330, 295, 331, 312, 324, 298, 339,
+        )
+        var exitAt = -1L
+        for (interval in intervals) {
+            now += interval
+            core.onStep(now, now)
+            if (!core.slowAlarm && exitAt < 0L) exitAt = now
+        }
+        assertTrue("稳定恢复不应因时间戳抖动永远维持报警", exitAt > 0L)
+        assertTrue("包含 600ms 配置确认后应在 2.5s 内解除：${exitAt - recoveryStart}ms",
+            exitAt - recoveryStart in 1_200..2_500)
+    }
+
+    @Test
+    fun `ideal recovery remains responsive with unchanged confirmation delay`() {
+        core.config = core.config.copy(targetSpm = 190)
+        now = 1_000
+        core.onStep(now, now)
+        repeat(16) { now += 375; core.onStep(now, now) }
+        assertTrue(core.slowAlarm)
+        val recoveryStart = now
+        var exitAt = -1L
+        repeat(8) {
+            now += 316 // 190 SPM
+            core.onStep(now, now)
+            if (!core.slowAlarm && exitAt < 0L) exitAt = now
+        }
+        assertTrue("理想输入应继续快速解除", exitAt > 0L)
+        assertTrue("恢复估计 + 原 600ms 确认应小于 2.5s：${exitAt - recoveryStart}ms",
+            exitAt - recoveryStart in 1_200..2_500)
+        assertEquals(600L, core.config.recoverMs)
+        assertEquals(5_000L, core.config.alarmAfterMs)
     }
 
     @Test

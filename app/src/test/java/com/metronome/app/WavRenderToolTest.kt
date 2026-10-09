@@ -37,7 +37,11 @@ class WavRenderToolTest {
             "finish.wav" to SoundBank.finishPcm(),
         )
         for ((name, pcm) in samples) {
-            writeWav(File(dir, name), pcm, SoundBank.RATE)
+            val file = File(dir, name)
+            writeWav(file, pcm, SoundBank.RATE)
+            val decoded = file.inputStream().use { SoundBank.parseWav(it) }
+            assertEquals("$name WAV 头部或 PCM 数据无效", pcm.toList(), decoded?.first?.toList())
+            assertEquals("$name 采样率无效", SoundBank.RATE, decoded?.second)
             checkSample(name, pcm)
         }
     }
@@ -61,12 +65,12 @@ class WavRenderToolTest {
             out.write("WAVE".toByteArray())
             out.write("fmt ".toByteArray())
             out.writeLE(16)
-            out.writeLE(1)          // PCM
-            out.writeLE(1)          // mono
+            out.writeLE16(1)        // PCM
+            out.writeLE16(1)        // mono
             out.writeLE(rate)
             out.writeLE(rate * 2)   // byte rate
-            out.writeLE(2)          // block align
-            out.writeLE(16)         // bits
+            out.writeLE16(2)        // block align
+            out.writeLE16(16)       // bits
             out.write("data".toByteArray())
             out.writeLE(dataLen)
             for (s in pcm) {
@@ -81,5 +85,10 @@ class WavRenderToolTest {
         write((v shr 8) and 0xFF)
         write((v shr 16) and 0xFF)
         write((v shr 24) and 0xFF)
+    }
+
+    private fun FileOutputStream.writeLE16(v: Int) {
+        write(v and 0xFF)
+        write((v shr 8) and 0xFF)
     }
 }

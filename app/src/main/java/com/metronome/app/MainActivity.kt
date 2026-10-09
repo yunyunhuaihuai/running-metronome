@@ -28,9 +28,13 @@ import com.metronome.app.core.AlarmStyle
 import com.metronome.app.core.BlockRenderer
 import com.metronome.app.core.DetectorCore
 import com.metronome.app.core.LoopSpec
+import com.metronome.app.core.Preset
 import com.metronome.app.core.SessionStateMachine
 import com.metronome.app.core.TrainingSegment
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.UUID
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -85,6 +89,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var spinPreset: Spinner
     private lateinit var btnPresetSave: MaterialButton
     private lateinit var btnPresetApply: MaterialButton
+    private lateinit var btnPresetRename: MaterialButton
     private lateinit var btnPresetUpdate: MaterialButton
     private lateinit var btnPresetDelete: MaterialButton
     private lateinit var beatDot: View
@@ -92,6 +97,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var alarmStatusText: TextView
 
     private var updatingUi = false
+    private var displayedPresets: List<Preset> = emptyList()
+    private var preferredPresetId: String? = null
+    private var presetApplyGeneration = 0L
+    private var presetApplyJob: Job? = null
 
     // 分段编辑草稿（编辑态与运行快照分离：会话启动时取快照，运行中编辑不影响）
     private data class SegDraft(var name: String, var dur: String, var spm: String)
@@ -174,6 +183,7 @@ class MainActivity : AppCompatActivity() {
         spinPreset = findViewById(R.id.spinPreset)
         btnPresetSave = findViewById(R.id.btnPresetSave)
         btnPresetApply = findViewById(R.id.btnPresetApply)
+        btnPresetRename = findViewById(R.id.btnPresetRename)
         btnPresetUpdate = findViewById(R.id.btnPresetUpdate)
         btnPresetDelete = findViewById(R.id.btnPresetDelete)
         beatDot = findViewById(R.id.beatDot)
@@ -237,7 +247,7 @@ class MainActivity : AppCompatActivity() {
 
         swLCustom.setOnCheckedChangeListener { _, checked ->
             if (updatingUi) return@setOnCheckedChangeListener
-            if (checked && MetronomeEngine.leftCustom.value == null) {
+            if (checked && (MetronomeEngine.leftCustom.value == null || SoundBank.leftPcm == null)) {
                 // 没有可用自定义资源 → 引导导入，不开空开关
                 swLCustom.isChecked = false
                 pendingFoot = BlockRenderer.Foot.LEFT
@@ -248,7 +258,7 @@ class MainActivity : AppCompatActivity() {
         }
         swRCustom.setOnCheckedChangeListener { _, checked ->
             if (updatingUi) return@setOnCheckedChangeListener
-            if (checked && MetronomeEngine.rightCustom.value == null) {
+            if (checked && (MetronomeEngine.rightCustom.value == null || SoundBank.rightPcm == null)) {
                 swRCustom.isChecked = false
                 pendingFoot = BlockRenderer.Foot.RIGHT
                 pickAudio.launch(arrayOf("audio/*"))
@@ -383,20 +393,21 @@ class MainActivity : AppCompatActivity() {
         // 预设
         btnPresetSave.setOnClickListener { showPresetSaveDialog() }
         btnPresetApply.setOnClickListener {
-            selectedPreset()?.let { p ->
-                MetronomeEngine.applyPreset(p)
-                restorePresetAudio(p)
-                Toast.makeText(this, "已应用「${p.name}」（不会自动开始训练）", Toast.LENGTH_SHORT).show()
-            }
+            selectedPreset()?.let(::applySelectedPreset)
         }
+        btnPresetRename.setOnClickListener { selectedPreset()?.let(::showPresetRenameDialog) }
         btnPresetUpdate.setOnClickListener {
             selectedPreset()?.let { p ->
+                preferredPresetId = p.id
                 MetronomeEngine.upsertPreset(MetronomeEngine.currentAsPreset(p.id, p.name))
                 Toast.makeText(this, "已用当前设置更新「${p.name}」", Toast.LENGTH_SHORT).show()
             }
         }
         btnPresetDelete.setOnClickListener {
             selectedPreset()?.let { p ->
+                val index = MetronomeEngine.presets.value.indexOfFirst { it.id == p.id }
+                preferredPresetId = MetronomeEngine.presets.value.filterNot { it.id == p.id }
+                    .getOrNull(index.coerceAtMost(MetronomeEngine.presets.value.size - 2))?.id
                 MetronomeEngine.deletePreset(p.id)
                 Toast.makeText(this, "已删除「${p.name}」", Toast.LENGTH_SHORT).show()
             }
@@ -567,21 +578,60 @@ class MainActivity : AppCompatActivity() {
             hint = getString(R.string.preset_name_hint)
             setSingleLine(true)
         }
-        AlertDialog.Builder(this)
+        val dialog = AlertDialog.Builder(this)
             .setTitle(R.string.preset_save)
             .setView(input)
-            .setPositiveButton(android.R.string.ok) { _, _ ->
-                val name = input.text.toString().trim().ifEmpty { "预设" }
-                MetronomeEngine.upsertPreset(
-                    MetronomeEngine.currentAsPreset(UUID.randomUUID().toString(), name)
-                )
-                Toast.makeText(this, "已保存「$name」", Toast.LENGTH_SHORT).show()
-            }
+            .setPositiveButton(android.R.string.ok, null)
             .setNegativeButton(android.R.string.cancel, null)
             .show()
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            val name = input.text.toString().trim()
+            if (name.isEmpty()) {
+                input.error = "请输入预设名称"
+                return@setOnClickListener
+            }
+            if (MetronomeEngine.presets.value.any { it.name == name }) {
+                input.error = "已有同名预设，请换一个名称"
+                return@setOnClickListener
+            }
+            val id = UUID.randomUUID().toString()
+            preferredPresetId = id
+            MetronomeEngine.upsertPreset(MetronomeEngine.currentAsPreset(id, name))
+            Toast.makeText(this, "已保存「$name」", Toast.LENGTH_SHORT).show()
+            dialog.dismiss()
+        }
     }
 
-    private fun selectedPreset(): com.metronome.app.core.Preset? {
+    private fun showPresetRenameDialog(p: Preset) {
+        val input = EditText(this).apply {
+            setSingleLine(true)
+            setText(p.name)
+            setSelection(p.name.length)
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle(R.string.preset_rename)
+            .setView(input)
+            .setPositiveButton(android.R.string.ok, null)
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            val name = input.text.toString().trim()
+            if (name.isEmpty()) {
+                input.error = "请输入预设名称"
+                return@setOnClickListener
+            }
+            if (MetronomeEngine.presets.value.any { it.id != p.id && it.name == name }) {
+                input.error = "已有同名预设，请换一个名称"
+                return@setOnClickListener
+            }
+            preferredPresetId = p.id
+            MetronomeEngine.upsertPreset(p.copy(name = name))
+            Toast.makeText(this, "已改名为「$name」", Toast.LENGTH_SHORT).show()
+            dialog.dismiss()
+        }
+    }
+
+    private fun selectedPreset(): Preset? {
         val list = MetronomeEngine.presets.value
         val pos = spinPreset.selectedItemPosition
         if (list.isEmpty() || pos !in list.indices) {
@@ -591,36 +641,64 @@ class MainActivity : AppCompatActivity() {
         return list[pos]
     }
 
-    /** 应用预设后恢复其引用的自定义音频 PCM；缺失则提示并回退内置 */
-    private fun restorePresetAudio(p: com.metronome.app.core.Preset) {
-        lifecycleScope.launch {
-            suspend fun ensure(
-                foot: BlockRenderer.Foot,
-                asset: com.metronome.app.core.AudioAsset?,
-            ): Boolean {
-                if (asset == null) return false
-                val pcm = AudioImporter.loadAssetPcm(this@MainActivity, foot, asset)
-                if (pcm == null) return false
-                if (foot == BlockRenderer.Foot.LEFT) SoundBank.leftPcm = pcm
-                else SoundBank.rightPcm = pcm
-                return true
+    /** 先恢复音频资源，再整体应用设置，避免短暂播放上一预设的 PCM。 */
+    private fun applySelectedPreset(p: Preset) {
+        val generation = ++presetApplyGeneration
+        presetApplyJob?.cancel()
+        presetApplyJob = lifecycleScope.launch {
+            val state = MetronomeEngine.sessionState.value
+            val active = state == SessionStateMachine.State.RUNNING || state == SessionStateMachine.State.PREPARING
+            val hasPlan = p.training.timerEnabled || p.training.segmentMode
+            if (active && hasPlan) {
+                MetronomeService.pause(this@MainActivity)
+                val paused = withTimeoutOrNull(3000) {
+                    MetronomeEngine.sessionState.first {
+                        it != SessionStateMachine.State.RUNNING && it != SessionStateMachine.State.PREPARING
+                    }
+                }
+                if (paused == null) {
+                    Toast.makeText(this@MainActivity, "暂停未完成，预设未应用", Toast.LENGTH_LONG).show()
+                    return@launch
+                }
             }
-            val lOk = ensure(BlockRenderer.Foot.LEFT, p.leftCustom)
-            val rOk = ensure(BlockRenderer.Foot.RIGHT, p.rightCustom)
-            if (p.leftUseCustom && !lOk) {
-                MetronomeEngine.setLeftUseCustom(false)
+            AudioImporter.cancelPending(BlockRenderer.Foot.LEFT)
+            AudioImporter.cancelPending(BlockRenderer.Foot.RIGHT)
+            val leftPcm = p.leftCustom?.let {
+                AudioImporter.loadAssetPcm(this@MainActivity, BlockRenderer.Foot.LEFT, it)
+            }
+            val rightPcm = p.rightCustom?.let {
+                AudioImporter.loadAssetPcm(this@MainActivity, BlockRenderer.Foot.RIGHT, it)
+            }
+            if (generation != presetApplyGeneration) return@launch
+            SoundBank.leftPcm = leftPcm
+            SoundBank.rightPcm = rightPcm
+            MetronomeEngine.applyPreset(p.copy(
+                leftCustom = if (leftPcm != null) p.leftCustom else null,
+                rightCustom = if (rightPcm != null) p.rightCustom else null,
+                leftUseCustom = p.leftUseCustom && leftPcm != null,
+                rightUseCustom = p.rightUseCustom && rightPcm != null,
+            ))
+            if (p.leftUseCustom && leftPcm == null) {
                 Toast.makeText(this@MainActivity, "左脚自定义音频缺失，已回退内置音色", Toast.LENGTH_LONG).show()
             }
-            if (p.rightUseCustom && !rOk) {
-                MetronomeEngine.setRightUseCustom(false)
+            if (p.rightUseCustom && rightPcm == null) {
                 Toast.makeText(this@MainActivity, "右脚自定义音频缺失，已回退内置音色", Toast.LENGTH_LONG).show()
             }
+            val message = if (active && hasPlan) {
+                "已暂停并应用「${p.name}」。继续会沿用原会话计划；停止后重新开始才使用新计划。"
+            } else {
+                "已应用「${p.name}」（不会自动开始训练）"
+            }
+            Toast.makeText(this@MainActivity, message, Toast.LENGTH_LONG).show()
         }
     }
 
     // ------------------------------------------------------------ 导入
 
     private fun onAudioPicked(foot: BlockRenderer.Foot, uri: Uri) {
+        // 手动导入发生在异步预设恢复之后时，以用户最新选择为准。
+        presetApplyGeneration++
+        presetApplyJob?.cancel()
         val name = SoundBank.displayName(this, uri)
         AudioImporter.import(this, foot, uri, name)
     }
@@ -769,7 +847,8 @@ class MainActivity : AppCompatActivity() {
                             }
                             MetronomeEngine.LoadStatus.READY ->
                                 Toast.makeText(this@MainActivity, st.message ?: "", Toast.LENGTH_SHORT).show()
-                            else -> {}
+                            MetronomeEngine.LoadStatus.NONE ->
+                                customNameL.text = MetronomeEngine.leftCustom.value?.displayName ?: ""
                         }
                     }
                 }
@@ -783,7 +862,8 @@ class MainActivity : AppCompatActivity() {
                             }
                             MetronomeEngine.LoadStatus.READY ->
                                 Toast.makeText(this@MainActivity, st.message ?: "", Toast.LENGTH_SHORT).show()
-                            else -> {}
+                            MetronomeEngine.LoadStatus.NONE ->
+                                customNameR.text = MetronomeEngine.rightCustom.value?.displayName ?: ""
                         }
                     }
                 }
@@ -880,13 +960,20 @@ class MainActivity : AppCompatActivity() {
                 launch {
                     MetronomeEngine.presets.collect { list ->
                         val names = if (list.isEmpty()) listOf("（无预设）") else list.map { it.name }
+                        val selectedId = preferredPresetId
+                            ?: displayedPresets.getOrNull(spinPreset.selectedItemPosition)?.id
+                        preferredPresetId = null
+                        displayedPresets = list
                         updatingUi = true
                         spinPreset.adapter = ArrayAdapter(
                             this@MainActivity,
                             android.R.layout.simple_spinner_dropdown_item, names
                         )
                         spinPreset.isEnabled = list.isNotEmpty()
+                        val selectedIndex = list.indexOfFirst { it.id == selectedId }
+                        if (list.isNotEmpty()) spinPreset.setSelection(selectedIndex.coerceAtLeast(0), false)
                         btnPresetApply.isEnabled = list.isNotEmpty()
+                        btnPresetRename.isEnabled = list.isNotEmpty()
                         btnPresetUpdate.isEnabled = list.isNotEmpty()
                         btnPresetDelete.isEnabled = list.isNotEmpty()
                         updatingUi = false

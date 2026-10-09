@@ -729,6 +729,15 @@ class MetronomeService : Service() {
             }
             streamFrames += BLOCK_FRAMES
             rebuilds = 0   // 成功写入一块即认为轨道健康，重建额度重新计
+            if (BuildConfig.DEBUG) {
+                // 这两个时刻只证明 PCM 已成功提交给 AudioTrack，不代表扬声器/蓝牙可闻时刻。
+                result.promptStartedAtFrame?.let { frame ->
+                    Log.i("MetroPrompt", "pcm-submitted frame=$frame wall=${SystemClock.elapsedRealtime()}")
+                }
+                if (result.promptFadeRequested) {
+                    Log.i("MetroPrompt", "fade-submitted frame=$frameBase wall=${SystemClock.elapsedRealtime()}")
+                }
+            }
 
             armMarker(t)
 

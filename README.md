@@ -13,7 +13,7 @@
 - **采样时钟驱动的节拍**：
   - 节拍由 `AudioTrack` 的 PCM 采样帧定位（48kHz，双耳/立体声输出），每拍按
     流内绝对帧号精确落点，不依赖 Handler 定时；间隔与音频硬件时钟对齐，
-    无累积漂移。
+    设计上避免逐拍定时器的累积漂移。实际真机计数与间隔以测试日志为准。
 - **训练会话**：
   - 明确的会话状态（准备中/训练中/已暂停/已完成/错误）；暂停冻结计时且
     保留进度，停止才清空；前台服务持有会话，息屏、切走后持续运行。
@@ -63,11 +63,28 @@
 
 - **最低支持**：Android 8.0 (API 26) 及以上
 - **推荐系统**：Android 14 / Android 15
-- **重点待测机型**：OnePlus 13 (PJZ110, Snapdragon 8 Elite, ColorOS 15)
+- **本次真机**：OnePlus 13（PJZ110，Android 15 / ColorOS 15）
 
-> v2.0 的全部改动已在模拟器（API 35 x86_64）完成构建、单元测试与运行验证；
-> 真实跑步步点、OnePlus 13 传感器延迟、ColorOS 息屏策略、蓝牙双耳链路、
-> 扬声器听感等项留待真机验证，见《真机测试指南》。
+2026-10-09 在 OnePlus 13 上已复测左右脚各自通过 SAF 导入 WAV（`left-softbell.wav`
+和 `right-wood.wav`），重启 App 后两份资源仍显示且启用；命名预设的新增、改名、
+更新、应用、删除入口已在真机操作。修正测试样本生成器的 WAV 头部后，导入才成功；
+旧样本的失败不能归因于正式解析器。最终代码已完成 **107 个 JVM 测试
+（0 失败、0 跳过）、`lintDebug`、debug/release APK 构建**，日志见
+`D:\APK\running-metronome_Data\real-device-20261009\gradle-final-build.log`，验证记录见
+`D:\APK\running-metronome_Data\real-device-20261009\验证报告.md`。
+
+最终 debug APK 安装后的 `test_metronome.sh all` 在 OnePlus 13 上退出码为 0：
+120 SPM 的 60 秒窗口 120 拍，息屏 30 秒 60 拍，注入报警、定时分段、受控
+播放器焦点与五次启停用例均通过。报警日志记录慢速累计起点后 5,001 ms
+进入报警，再过 92 ms 提交短提示 PCM；恢复确认起点后 601 ms 解除报警，
+再过 36 ms 提交淡出 PCM。这些是 AudioTrack 写入/提交时间，不代表实际
+可闻时间。相同理想合成输入的离线对照为旧版/修复版触发 6,125/5,750 ms、
+解除 3,473/1,863 ms，均保留原 5,000/600 ms 配置等待；固定合成抖动下
+修复版也不再卡在报警状态。对照文件位于
+`D:\APK\running-metronome_Data\real-device-20261009\cadence-comparison\离线步频报警对比.md`。
+真实跑步传感器投递与报警端到端响应、ColorOS 长时间息屏、蓝牙双耳链路
+与路由切换、真实音乐 App 的压低行为，以及扬声器或耳机的主观听感仍未验证，
+见《真机测试指南》。
 
 ---
 
@@ -122,10 +139,14 @@ com.metronome.app/
 
 ## 🙏 参考与致谢
 
-音频/训练状态机设计参考了以下开源项目（仅借鉴思路与局部实现，未整仓复制）：
-[GOTronome](https://github.com/depasca/GOTronome)（MIT） StrikePool/Voices 的
-余音跨块与包络思路；[timer-machine-android](https://github.com/timer-machine/timer-machine-android)
-（GPL-3.0） 分段/循环组的状态转移思路（结构理解后自行实现，未移入其源码）；
-[Metronome-Android](https://github.com/fennifith/Metronome-Android)（Apache-2.0）
-命令入口与 BPM 收藏交互；[RunningCadence](https://github.com/aleung/RunningCadence)
-（Apache-2.0） 提醒间隔设计反例。详见交付报告《参考与复用说明》。
+本次实现参考下列固定版本的源码，相关设计均在本仓库用 Kotlin 实现；
+未移入这些项目的源码或采样文件：
+
+- [GOTronome `StrikePool.h` 的 `strike()`/`renderPool()`](https://github.com/depasca/GOTronome/blob/e22d28dca85590f331fc1ade10039ec7bdeb89d3/app/src/main/cpp/StrikePool.h)
+  （MIT）：参考声部跨块延续与尾音处理，落实在本项目 `PcmMixer`/`BlockRenderer`。
+- [TimeR Machine `StepEntity.Group`](https://github.com/timer-machine/timer-machine-android/blob/54c64d18d3cc8da03dac0416510e0c189c5e1572/domain/src/main/java/xyz/aprildown/timer/domain/entities/StepEntity.kt)
+  （GPL-3.0）：仅参考“多段组成一个循环组”的建模思路，`TrainingCore` 是独立实现，未复制 GPL 代码。
+- [Metronome-Android `MainActivity.addBookmark()`](https://github.com/fennifith/Metronome-Android/blob/518353ab1e0a054ff4c59a6f3cd530610104f5b6/app/src/main/java/james/metronome/activities/MainActivity.java)
+  （Apache-2.0）：参考常用 BPM 的保存交互；本项目自行实现可命名的完整配置预设。
+- [RunningCadence `VoiceFeedback.calculateFeedbackInterval()`](https://github.com/aleung/RunningCadence/blob/95901d2550cbcc09298b3ac74ee67a087d777980/RunningCadence/src/leoliang/runningcadence/VoiceFeedback.java)
+  （Apache-2.0）：用作旧式慢速提醒间隔的反例，未复用实现。

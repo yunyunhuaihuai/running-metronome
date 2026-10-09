@@ -58,7 +58,15 @@ class BlockRenderer(
 
     data class ScheduledBeat(val num: Long, val frame: Long, val foot: Foot)
 
-    class BlockResult(val beats: List<ScheduledBeat>, val peakL: Int, val peakR: Int)
+    class BlockResult(
+        val beats: List<ScheduledBeat>,
+        val peakL: Int,
+        val peakR: Int,
+        /** First prompt voice added to this block; null if no PCM was available. */
+        val promptStartedAtFrame: Long?,
+        /** A previously scheduled prompt was cancelled and fade-out requested. */
+        val promptFadeRequested: Boolean,
+    )
 
     private val mixer = PcmMixer(blockFrames)
     private val accL = IntArray(blockFrames)
@@ -172,19 +180,25 @@ class BlockRenderer(
         }
 
         // 2) 报警短提示：按音频帧单调排定；解除时立即停止安排后续提示
+        var promptStartedAtFrame: Long? = null
+        var promptFadeRequested = false
         if (snap.promptActive && snap.soundEnabled) {
             if (nextPromptAt < 0) nextPromptAt = frameBase + PROMPT_LEAD_FRAMES
             if (nextPromptAt < frameBase) nextPromptAt = frameBase // 长时间未出声后不补发积压提示
             while (nextPromptAt < frameBase + blockFrames) {
                 val offset = (nextPromptAt - frameBase).toInt().coerceIn(0, blockFrames)
                 sounds.promptPcm()?.let {
-                    if (it.isNotEmpty()) mixer.addVoice(it, offset, PcmMixer.Group.PROMPT, PcmMixer.Target.BOTH)
+                    if (it.isNotEmpty()) {
+                        mixer.addVoice(it, offset, PcmMixer.Group.PROMPT, PcmMixer.Target.BOTH)
+                        if (promptStartedAtFrame == null) promptStartedAtFrame = nextPromptAt
+                    }
                 }
                 nextPromptAt += snap.promptIntervalFrames.coerceAtLeast(blockFrames.toLong())
             }
         } else if (nextPromptAt >= 0) {
             // 刚解除：未播出的提示声部极短淡出，后续不再安排
             mixer.fadeOutGroup(PcmMixer.Group.PROMPT, PROMPT_FADE_FRAMES)
+            promptFadeRequested = true
             nextPromptAt = -1
         }
 
@@ -238,7 +252,7 @@ class BlockRenderer(
                 if (li > peakL) peakL = li
             }
         }
-        return BlockResult(beats, peakL, peakR)
+        return BlockResult(beats, peakL, peakR, promptStartedAtFrame, promptFadeRequested)
     }
 
     companion object {
