@@ -100,6 +100,27 @@ class CadenceEstimatorTest {
     }
 
     @Test
+    fun `stride event calibration converts both display and recovery to footfalls per minute`() {
+        // A detector event every 667 ms is 90 events/minute, but on this
+        // calibration each event represents a left+right stride (180 steps/minute).
+        val strideEstimator = CadenceEstimator(stepsPerSensorEvent = 2)
+        repeat(7) { strideEstimator.onStep(1_000L + it * 667L) }
+        assertEquals(180f, strideEstimator.medianSpm, 1f)
+        assertEquals(180f, strideEstimator.displaySpm, 1f)
+        assertEquals(180f, strideEstimator.recoverySpm, 1f)
+
+        val defaultEstimator = CadenceEstimator()
+        repeat(7) { defaultEstimator.onStep(1_000L + it * 667L) }
+        assertEquals(90f, defaultEstimator.medianSpm, 1f)
+        assertEquals(90f, defaultEstimator.recoverySpm, 1f)
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `invalid sensor event step count is rejected`() {
+        CadenceEstimator(stepsPerSensorEvent = 3)
+    }
+
+    @Test
     fun `reset clears everything`() {
         feed(180.0, 6)
         est.reset()

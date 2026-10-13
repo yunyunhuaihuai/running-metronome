@@ -76,6 +76,8 @@ object StepTracker : SensorEventListener {
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private var deadlineJob: Job? = null
     private var flowWatcher: Job? = null
+    private var sensorLogStartMs = 0L
+    private var sensorLogEvents = 0
 
     private val stateLock = Any()
 
@@ -129,6 +131,8 @@ object StepTracker : SensorEventListener {
                 MetronomeEngine.sessionState,
             ) { detect, run, target, alarmEn, sess ->
                 arrayOf(detect, run, target, alarmEn, sess)
+            }.combine(MetronomeEngine.sensorStepsPerEvent) { _, _ ->
+                Unit
             }.collect {
                 synchronized(stateLock) {
                     val prevTarget = core.config.targetSpm
@@ -165,6 +169,8 @@ object StepTracker : SensorEventListener {
             minStepsForValid = old.minStepsForValid,
             minStepIntervalMs = old.minStepIntervalMs,
             graceMs = old.graceMs,
+            // 测试注入使用明确的每事件一步序列，避免设备校准改变既有测试含义。
+            stepsPerSensorEvent = if (injectionActive) 1 else MetronomeEngine.sensorStepsPerEvent.value,
         )
     }
 
@@ -205,6 +211,8 @@ object StepTracker : SensorEventListener {
             return
         }
         core.reset()
+        sensorLogStartMs = 0L
+        sensorLogEvents = 0
         isTracking = true
         availabilityInternal = Availability.OK
         Log.i(TAG, "StepTracker started (event-driven, no fixed ticker)")
@@ -222,12 +230,15 @@ object StepTracker : SensorEventListener {
 
     override fun onSensorChanged(event: SensorEvent?) {
         if (event == null || event.sensor.type != Sensor.TYPE_STEP_DETECTOR) return
-        if (!isTracking) return
+        if (!isTracking || injectionActive) return
         val arrival = SystemClock.elapsedRealtime()
         // event.timestamp 与 SystemClock.elapsedRealtimeNanos 同基（自 API 19 起）
         val eventMs = event.timestamp / 1_000_000L
         synchronized(stateLock) {
+            if (!isTracking || injectionActive) return
+            updateCoreConfigLocked()
             core.onStep(eventMs, arrival)
+            if (BuildConfig.DEBUG) logSensorWindowLocked(eventMs, arrival)
             publishLocked()
             scheduleDeadlineLocked()
         }
@@ -240,12 +251,15 @@ object StepTracker : SensorEventListener {
      * 复用与真实事件完全相同的估计/状态机路径。
      */
     fun injectStep(eventMs: Long = SystemClock.elapsedRealtime()) {
-        if (!injectionActive) {
-            injectionActive = true
-        }
         synchronized(stateLock) {
-            if (!isTracking) reconcileTrackingLocked()
+            if (!injectionActive) {
+                // 真机也可运行注入测试：先注销真实 Step Detector，不能混入两路事件。
+                if (isTracking) stopLocked()
+                injectionActive = true
+                reconcileTrackingLocked()
+            }
             if (!isTracking) return
+            updateCoreConfigLocked()
             core.onStep(eventMs, SystemClock.elapsedRealtime())
             publishLocked()
             scheduleDeadlineLocked()
@@ -253,8 +267,31 @@ object StepTracker : SensorEventListener {
     }
 
     fun clearInjection() {
-        injectionActive = false
-        synchronized(stateLock) { reconcileTrackingLocked() }
+        synchronized(stateLock) {
+            if (injectionActive && isTracking) stopLocked()
+            injectionActive = false
+            reconcileTrackingLocked()
+        }
+    }
+
+    /** 调试版每 20 个真实回调记录原始事件频率，供跑步后区分传感器漏步与换算问题。 */
+    private fun logSensorWindowLocked(eventMs: Long, arrivalMs: Long) {
+        if (sensorLogEvents == 0) sensorLogStartMs = eventMs
+        sensorLogEvents++
+        if (sensorLogEvents < 21) return
+        val spanMs = eventMs - sensorLogStartMs
+        if (spanMs > 0L) {
+            val rawEventSpm = 60_000f * (sensorLogEvents - 1) / spanMs
+            Log.i(
+                "MetroSensor",
+                "sensor=${stepDetector?.name} rawCallbackIntervals=${sensorLogEvents - 1}" +
+                    " spanMs=$spanMs rawEventSpm=$rawEventSpm" +
+                    " factor=${core.config.stepsPerSensorEvent} correctedSpm=${core.cadenceSpm}" +
+                    " deliveryAgeMs=${arrivalMs - eventMs}",
+            )
+        }
+        sensorLogEvents = 1
+        sensorLogStartMs = eventMs
     }
 
     /**
@@ -297,8 +334,10 @@ object StepTracker : SensorEventListener {
             val wall = SystemClock.elapsedRealtime()
             if (s.alarm) {
                 Log.i("MetroAlarm", "enter slowStart=${c.slowStartAtMs} coreAt=${c.alarmEnteredAtMs} wall=$wall wait=${c.config.alarmAfterMs} cadence=${c.cadenceSpm} target=${c.config.targetSpm}")
-            } else {
+            } else if (c.alarmExitedAtMs > 0L) {
                 Log.i("MetroAlarm", "exit recoveryStart=${c.alarmRecoveryStartAtMs} coreAt=${c.alarmExitedAtMs} wall=$wall confirm=${c.config.recoverMs} cadence=${c.cadenceSpm} target=${c.config.targetSpm}")
+            } else {
+                Log.i("MetroAlarm", "cleared wall=$wall reason=config_or_tracking_reset factor=${c.config.stepsPerSensorEvent}")
             }
         }
         if (s != snapshot.value) snapshot.value = s

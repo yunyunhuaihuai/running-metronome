@@ -201,6 +201,40 @@
                 android:checked="true" />
         </LinearLayout>
 
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/sensor_calibration"
+            android:textSize="15sp" />
+
+        <RadioGroup
+            android:id="@+id/sensorCalibration"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <RadioButton
+                android:id="@+id/sensorOneStep"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/sensor_one_step" />
+
+            <RadioButton
+                android:id="@+id/sensorTwoSteps"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="16dp"
+                android:text="@string/sensor_two_steps" />
+        </RadioGroup>
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:alpha="0.7"
+            android:text="@string/sensor_calibration_hint"
+            android:textSize="13sp" />
+
         <!-- ============ 声音 ============ -->
         <LinearLayout
             android:layout_width="match_parent"

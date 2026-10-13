@@ -6,11 +6,15 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.text.InputType
+import android.view.HapticFeedbackConstants
+import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.RadioGroup
 import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
@@ -41,6 +45,10 @@ import kotlin.math.roundToInt
 
 class MainActivity : AppCompatActivity() {
 
+    private companion object {
+        const val PAUSE_HOLD_MS = 1_000L
+    }
+
     // ------------------------------------------------------------ 视图
     private lateinit var bpmText: TextView
     private lateinit var statusText: TextView
@@ -64,6 +72,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var customNameR: TextView
     private lateinit var spinChannel: Spinner
     private lateinit var swDetect: MaterialSwitch
+    private lateinit var sensorCalibration: RadioGroup
     private lateinit var swAlarm: MaterialSwitch
     private lateinit var alarmBox: View
     private lateinit var spinAlarmStyle: Spinner
@@ -101,6 +110,10 @@ class MainActivity : AppCompatActivity() {
     private var preferredPresetId: String? = null
     private var presetApplyGeneration = 0L
     private var presetApplyJob: Job? = null
+    private var pauseHoldTouchActive = false
+    private var pauseHoldArmed = false
+    private var pauseHoldRunnable: Runnable? = null
+    private var suppressNextPlayClick = false
 
     // 分段编辑草稿（编辑态与运行快照分离：会话启动时取快照，运行中编辑不影响）
     private data class SegDraft(var name: String, var dur: String, var spm: String)
@@ -132,6 +145,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
+        cancelPauseHoldGesture()
         StepTracker.setActivityVisible(false)
     }
 
@@ -158,6 +172,7 @@ class MainActivity : AppCompatActivity() {
         customNameR = findViewById(R.id.customNameR)
         spinChannel = findViewById(R.id.spinChannel)
         swDetect = findViewById(R.id.swDetect)
+        sensorCalibration = findViewById(R.id.sensorCalibration)
         swAlarm = findViewById(R.id.swAlarm)
         alarmBox = findViewById(R.id.alarmBox)
         spinAlarmStyle = findViewById(R.id.spinAlarmStyle)
@@ -212,8 +227,61 @@ class MainActivity : AppCompatActivity() {
             MetronomeEngine.setTargetSpm(MetronomeEngine.targetSpm.value + 5)
         }
 
-        // 会话控制：开始 / 暂停 / 继续 与 停止 是不同动作
+        // 运行时主界面要求按住 1 秒才暂停，避免跑动中误触；系统媒体控制仍可点按。
+        val touchSlop = ViewConfiguration.get(this).scaledTouchSlop
+        btnPlay.setOnTouchListener { view, event ->
+            when {
+                event.actionMasked == MotionEvent.ACTION_DOWN && canPauseSession() -> {
+                    pauseHoldTouchActive = true
+                    pauseHoldArmed = true
+                    view.isPressed = true
+                    val action = Runnable {
+                        pauseHoldRunnable = null
+                        if (pauseHoldTouchActive && pauseHoldArmed) {
+                            pauseHoldArmed = false
+                            if (canPauseSession()) {
+                                view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                                MetronomeService.pause(this)
+                            }
+                        }
+                    }
+                    pauseHoldRunnable = action
+                    view.postDelayed(action, PAUSE_HOLD_MS)
+                    true
+                }
+                pauseHoldTouchActive -> {
+                    when (event.actionMasked) {
+                        MotionEvent.ACTION_POINTER_DOWN -> disarmPauseHold()
+                        MotionEvent.ACTION_MOVE -> {
+                            if (event.pointerCount != 1 ||
+                                event.x < -touchSlop || event.x > view.width + touchSlop ||
+                                event.y < -touchSlop || event.y > view.height + touchSlop
+                            ) disarmPauseHold()
+                        }
+                        MotionEvent.ACTION_UP -> {
+                            val shortTap = pauseHoldArmed && event.x >= 0 && event.x <= view.width &&
+                                event.y >= 0 && event.y <= view.height
+                            cancelPauseHoldGesture()
+                            if (shortTap) {
+                                // performClick 保留无障碍点击语义；本次普通短触只显示提示。
+                                suppressNextPlayClick = true
+                                view.performClick()
+                                suppressNextPlayClick = false
+                            }
+                        }
+                        MotionEvent.ACTION_CANCEL -> cancelPauseHoldGesture()
+                    }
+                    true
+                }
+                else -> false
+            }
+        }
         btnPlay.setOnClickListener {
+            if (suppressNextPlayClick) {
+                suppressNextPlayClick = false
+                Toast.makeText(this, R.string.pause_hold_hint, Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
             when (MetronomeEngine.sessionState.value) {
                 SessionStateMachine.State.RUNNING,
                 SessionStateMachine.State.PREPARING -> MetronomeService.pause(this)
@@ -298,6 +366,12 @@ class MainActivity : AppCompatActivity() {
         // 检测 / 报警
         swDetect.setOnCheckedChangeListener { _, checked ->
             if (!updatingUi) MetronomeEngine.setDetectionEnabled(checked)
+        }
+        sensorCalibration.setOnCheckedChangeListener { _, checkedId ->
+            if (!updatingUi) {
+                val steps = if (checkedId == R.id.sensorTwoSteps) 2 else 1
+                MetronomeEngine.setSensorStepsPerEvent(steps)
+            }
         }
         swAlarm.setOnCheckedChangeListener { _, checked ->
             if (!updatingUi) MetronomeEngine.setAlarmEnabled(checked)
@@ -412,6 +486,23 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "已删除「${p.name}」", Toast.LENGTH_SHORT).show()
             }
         }
+    }
+
+    private fun canPauseSession(): Boolean = when (MetronomeEngine.sessionState.value) {
+        SessionStateMachine.State.RUNNING, SessionStateMachine.State.PREPARING -> true
+        else -> false
+    }
+
+    private fun disarmPauseHold() {
+        pauseHoldArmed = false
+        pauseHoldRunnable?.let { btnPlay.removeCallbacks(it) }
+        pauseHoldRunnable = null
+        btnPlay.isPressed = false
+    }
+
+    private fun cancelPauseHoldGesture() {
+        disarmPauseHold()
+        pauseHoldTouchActive = false
     }
 
     private fun spinnerGuard(onSelected: (Int) -> Unit) =
@@ -743,7 +834,7 @@ class MainActivity : AppCompatActivity() {
                         updatingUi = true
                         btnPlay.text = when (st) {
                             SessionStateMachine.State.RUNNING,
-                            SessionStateMachine.State.PREPARING -> getString(R.string.pause)
+                            SessionStateMachine.State.PREPARING -> getString(R.string.pause_hold)
                             SessionStateMachine.State.PAUSED -> getString(R.string.resume)
                             else -> getString(R.string.start)
                         }
@@ -885,6 +976,14 @@ class MainActivity : AppCompatActivity() {
                     MetronomeEngine.detectionEnabled.collect { v ->
                         updatingUi = true
                         swDetect.isChecked = v
+                        updatingUi = false
+                    }
+                }
+                launch {
+                    MetronomeEngine.sensorStepsPerEvent.collect { steps ->
+                        updatingUi = true
+                        val id = if (steps == 2) R.id.sensorTwoSteps else R.id.sensorOneStep
+                        if (sensorCalibration.checkedRadioButtonId != id) sensorCalibration.check(id)
                         updatingUi = false
                     }
                 }

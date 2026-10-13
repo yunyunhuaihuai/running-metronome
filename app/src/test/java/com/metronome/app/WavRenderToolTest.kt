@@ -33,6 +33,8 @@ class WavRenderToolTest {
             "beat_softwood.wav" to SoundBank.builtin(4),
             "beat_softbell.wav" to SoundBank.builtin(5),
             "beat_lowdrum.wav" to SoundBank.builtin(6),
+            "beat_electronic_short.wav" to SoundBank.builtin(7),
+            "beat_electronic_mid.wav" to SoundBank.builtin(8),
             "prompt.wav" to SoundBank.promptPcm(),
             "finish.wav" to SoundBank.finishPcm(),
         )

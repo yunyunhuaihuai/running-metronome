@@ -21,6 +21,7 @@ import kotlin.math.exp
 import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sin
+import kotlin.math.tanh
 
 /**
  * 音色来源：内置音色为启动时（非音频线程）合成的 PCM；自定义音频经
@@ -28,14 +29,15 @@ import kotlin.math.sin
  * 存入 App 私有目录（[AudioAssets]），重启后仍可用。
  *
  * 音质处理（针对"截断/爆音/刺耳/机械感"）：
- *  - 所有内置音色以极短起音（≤1ms）保证辨拍清晰，不靠长淡入；
+ *  - 内置音色用短起音保持节拍边缘清晰；
  *  - 末尾统一 3ms 淡出到零，消除收尾 click；
- *  - 新增 3 种更柔和自然的音色（软木/柔铃/低鼓），保留原 4 种；
+ *  - 电子短音/中音以 A3+C4 为基音，添加手机扬声器更易重放的泛音；
  *  - 全部提前合成，音频线程只读不可变数组。
  */
 object SoundBank {
     private const val TAG = "SoundBank"
-    val BUILT_IN = listOf("咔嗒", "哔声", "木鱼", "牛铃", "软木", "柔铃", "低鼓")
+    // 只在末尾添加音色，旧版保存的音色索引与预设索引保持不变。
+    val BUILT_IN = listOf("咔嗒", "哔声", "木鱼", "牛铃", "软木", "柔铃", "低鼓", "电子短音", "电子中音")
     const val RATE = MetronomeEngine.RATE
     const val MAX_CUSTOM_SECONDS = 3.0
     const val DECODE_TIMEOUT_MS = 10_000L
@@ -90,9 +92,30 @@ object SoundBank {
                     val pitch = 190.0 - 60.0 * min(1.0, t / 0.06)
                     sin(2 * PI * pitch * t) * exp(-t * 34) * 0.62 * attack
                 },
+                // A3+C4 和弦：短音适合密集步频，中音在户外听感更饱满。
+                renderElectronicBeat(0.105, 0.070),
+                renderElectronicBeat(0.180, 0.115),
             )
         }
     }
+
+    private fun renderElectronicBeat(seconds: Double, holdEnd: Double): ShortArray =
+        render(seconds) { t ->
+            val attack = min(1.0, t / 0.0015)
+            val release = ((seconds - t) / (seconds - holdEnd)).coerceIn(0.0, 1.0)
+            val chord = electronicNote(220.0, t) + electronicNote(261.625565, t)
+            // 220/262Hz 基音在手机扬声器上容易衰减；二、三次泛音落在更清楚的
+            // 440–785Hz 区间。柔和限幅提高平均响度，避免直接截断产生刺耳杂音。
+            tanh(2.5 * chord) / TANH_ELECTRONIC_GAIN * attack * release
+        }
+
+    private fun electronicNote(hz: Double, t: Double): Double =
+        0.20 * sin(2 * PI * hz * t) +
+            0.23 * sin(4 * PI * hz * t) +
+            0.13 * sin(6 * PI * hz * t) +
+            0.06 * sin(8 * PI * hz * t)
+
+    private val TANH_ELECTRONIC_GAIN = tanh(2.5)
 
     private fun clickNoise(t: Double): Double =
         if (t < 0.002) {

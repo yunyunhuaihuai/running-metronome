@@ -148,7 +148,7 @@ class DebugReceiver : BroadcastReceiver() {
                 val durationMs = intent.getIntExtra("durationMs", 0).toLong()
                 startInjection(spm, durationMs)
             }
-            "com.metronome.app.debug.INJECT_STOP" -> stopInjection()
+            "com.metronome.app.debug.INJECT_STOP" -> stopInjection(clearTracker = true)
             "com.metronome.app.debug.ADJUST" -> {
                 MetronomeService.adjustTarget(context, intent.getIntExtra("delta", 0))
             }
@@ -163,7 +163,8 @@ class DebugReceiver : BroadcastReceiver() {
 
     private fun startInjection(spm: Int, durationMs: Long) {
         if (spm <= 0 || durationMs <= 0) return
-        stopInjection()
+        // 连续快/慢/快注入属于同一检测时间线，不清空报警与估计窗口。
+        stopInjection(clearTracker = false)
         injectionStop = false
         injectionActive = true
         injectionThread = Thread {
@@ -182,10 +183,14 @@ class DebugReceiver : BroadcastReceiver() {
         )
     }
 
-    private fun stopInjection() {
+    private fun stopInjection(clearTracker: Boolean) {
         injectionStop = true
         injectionThread?.join(1000)
         injectionThread = null
+        if (clearTracker && injectionActive) {
+            StepTracker.clearInjection()
+            injectionActive = false
+        }
     }
 
     companion object {

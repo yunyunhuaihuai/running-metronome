@@ -2,6 +2,7 @@ package com.metronome.app
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.os.Build
 import android.util.Log
 import com.metronome.app.core.AlarmConfig
 import com.metronome.app.core.AlarmStyle
@@ -51,6 +52,8 @@ object MetronomeEngine {
 
     /** 步频检测开关（与报警开关独立：检测可开、报警可关，反之报警依赖检测） */
     val detectionEnabled = MutableStateFlow(true)
+    /** 每个 Step Detector 事件对应的实际脚步数；仅校正检测/报警，不改节拍输出。 */
+    val sensorStepsPerEvent = MutableStateFlow(1)
     val alarmEnabled = MutableStateFlow(true)
     val alarmConfig = MutableStateFlow(AlarmConfig())
 
@@ -113,6 +116,10 @@ object MetronomeEngine {
             leftUseCustom.value = p.getBoolean("leftUseCustom", false) && leftCustom.value != null
             rightUseCustom.value = p.getBoolean("rightUseCustom", false) && rightCustom.value != null
             detectionEnabled.value = p.getBoolean("detectionEnabled", true)
+            // OnePlus 13 (PJZ110) 的跑步实测反馈约每两步才收到一次检测事件。
+            // 保留手动 1×/2× 选择，其他机型仍按 Android 的每事件一步语义处理。
+            val defaultStepsPerEvent = if (Build.MODEL.equals("PJZ110", ignoreCase = true)) 2 else 1
+            sensorStepsPerEvent.value = p.getInt("sensorStepsPerEvent", defaultStepsPerEvent).coerceIn(1, 2)
             alarmEnabled.value = p.getBoolean("alarmEnabled", true)
             alarmConfig.value = AlarmConfig(
                 slowMarginSpm = p.getInt("alarmSlowMargin", 8),
@@ -210,6 +217,11 @@ object MetronomeEngine {
     }
 
     fun setDetectionEnabled(v: Boolean) { detectionEnabled.value = v; save("detectionEnabled", v) }
+    fun setSensorStepsPerEvent(v: Int) {
+        val corrected = v.coerceIn(1, 2)
+        sensorStepsPerEvent.value = corrected
+        save("sensorStepsPerEvent", corrected)
+    }
     fun setAlarmEnabled(v: Boolean) { alarmEnabled.value = v; save("alarmEnabled", v) }
 
     fun setAlarmConfig(c: AlarmConfig) {
@@ -297,7 +309,8 @@ object MetronomeEngine {
                 " vibrate=${vibrateOn.value}(${vibrateStrength.value}%) chan=${channelMode.value}" +
                 " L=${timbreName(leftTimbre.value, leftUseCustom.value, leftCustom.value)}" +
                 " R=${timbreName(rightTimbre.value, rightUseCustom.value, rightCustom.value)}" +
-                " detect=${detectionEnabled.value} alarm=${alarmEnabled.value}" +
+                " detect=${detectionEnabled.value} sensorFactor=${sensorStepsPerEvent.value}" +
+                " alarm=${alarmEnabled.value}" +
                 " running=${running.value} clock=${clockRunning.value} session=${sessionState.value}" +
                 " beats=${beatCount.value}"
         )

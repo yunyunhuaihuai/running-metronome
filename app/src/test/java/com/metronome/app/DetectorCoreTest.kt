@@ -90,6 +90,48 @@ class DetectorCoreTest {
         assertEquals(1, core.stepCount)
     }
 
+    @Test
+    fun `two steps per sensor event does not falsely alarm at target cadence`() {
+        core.config = core.config.copy(targetSpm = 180, stepsPerSensorEvent = 2)
+        repeat(13) {
+            now = 1_000L + it * 667L
+            core.onStep(now, now)
+        }
+        assertEquals(DetectorCore.State.VALID, core.state)
+        assertEquals(180f, core.cadenceSpm, 1f)
+        assertEquals(180f, core.displaySpm, 1f)
+        assertEquals(180f, core.recoverySpm, 1f)
+        assertFalse("实际 180 SPM 时不能误报偏慢", core.slowAlarm)
+        assertEquals(0L, core.slowProgressMs)
+    }
+
+    @Test
+    fun `switching sensor event calibration clears old slow progress and warms up again`() {
+        core.config = core.config.copy(targetSpm = 180)
+        repeat(6) {
+            now = 1_000L + it * 667L
+            core.onStep(now, now)
+        }
+        assertTrue("未校准时应有偏慢累计", core.slowProgressMs > 0L)
+        repeat(6) {
+            now += 667L
+            core.onStep(now, now)
+        }
+        assertTrue("旧校准下的偏慢报警已触发", core.slowAlarm)
+        core.config = core.config.copy(stepsPerSensorEvent = 2)
+        assertEquals(DetectorCore.State.WARMING_UP, core.state)
+        assertEquals(0L, core.slowProgressMs)
+        assertEquals(0f, core.displaySpm, 0f)
+        assertFalse(core.slowAlarm)
+        repeat(5) {
+            now += 667L
+            core.onStep(now, now)
+        }
+        assertEquals(DetectorCore.State.VALID, core.state)
+        assertEquals(180f, core.cadenceSpm, 1f)
+        assertFalse(core.slowAlarm)
+    }
+
     // ------------------------------------------------ 报警触发（累计偏慢模型）
 
     @Test

@@ -15,7 +15,9 @@ package com.metronome.app.core
  *
  * 输入侧只接收已通过抖动过滤的步点事件时间（单调毫秒）。
  */
-class CadenceEstimator {
+class CadenceEstimator(val stepsPerSensorEvent: Int = 1) {
+
+    init { require(stepsPerSensorEvent in 1..2) { "stepsPerSensorEvent must be 1 or 2" } }
 
     private val events = ArrayDeque<Long>(8)
 
@@ -48,7 +50,9 @@ class CadenceEstimator {
         ints.sort()
         val median = if (k % 2 == 1) ints[k / 2] else (ints[k / 2 - 1] + ints[k / 2]) / 2f
         if (median <= 0f) return
-        val spm = (60_000f / median).coerceIn(MIN_SPM_F, MAX_SPM_F)
+        // A 2-step calibration covers observed one-event-per-stride delivery.
+        // Keep the physical step unit explicit for both display and alarm paths.
+        val spm = (60_000f * stepsPerSensorEvent / median).coerceIn(MIN_SPM_F, MAX_SPM_F)
         medianSpm = spm
         displaySpm = if (displaySpm <= 0f) spm else displaySpm * (1f - DISPLAY_ALPHA) + spm * DISPLAY_ALPHA
 
@@ -57,7 +61,8 @@ class CadenceEstimator {
         // 漏步会压低此值而延后解除，避免假恢复。
         recoverySpm = if (n >= RECOVERY_INTERVALS) {
             val span = events.last() - events.first()
-            if (span > 0L) (60_000f * RECOVERY_INTERVALS / span).coerceIn(MIN_SPM_F, MAX_SPM_F)
+            if (span > 0L) (60_000f * RECOVERY_INTERVALS * stepsPerSensorEvent / span)
+                .coerceIn(MIN_SPM_F, MAX_SPM_F)
             else 0f
         } else 0f
     }
@@ -102,7 +107,7 @@ class CadenceEstimator {
  */
 class DetectorCore(
     private val nowMs: () -> Long,
-    var config: Config = Config(),
+    config: Config = Config(),
 ) {
 
     data class Config(
@@ -116,7 +121,22 @@ class DetectorCore(
         val minStepsForValid: Int = 3,    // ≥3 步点（2 间隔）才认可
         val minStepIntervalMs: Long = 220,// 抖动/双计过滤
         val graceMs: Long = 1_500,        // 目标切换/恢复运行后的适应期
+        val stepsPerSensorEvent: Int = 1, // 传感器每事件代表的脚步数：一步或一跨步（两脚）
     )
+
+    var config: Config = config
+        set(value) {
+            require(value.stepsPerSensorEvent in 1..2) { "stepsPerSensorEvent must be 1 or 2" }
+            if (field.stepsPerSensorEvent != value.stepsPerSensorEvent) {
+                field = value
+                estimator = CadenceEstimator(value.stepsPerSensorEvent)
+                // Old interval estimates and slow-alarm progress use a different unit.
+                // Discard them before accepting events under the new calibration.
+                reset()
+            } else {
+                field = value
+            }
+        }
 
     enum class State { WARMING_UP, VALID, STALE }
 
@@ -134,7 +154,7 @@ class DetectorCore(
     var slowStartAtMs = 0L; private set   // 本段偏慢条件首次满足（处理时刻）
     var alarmRecoveryStartAtMs = 0L; private set // 最近一次报警解除时的恢复确认起点
 
-    private val estimator = CadenceEstimator()
+    private var estimator = CadenceEstimator(config.stepsPerSensorEvent)
     private var lastStepEventMs = 0L
     private var lastArrivalMs = 0L
     private var bankedMs = 0L
